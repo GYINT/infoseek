@@ -1,0 +1,13 @@
+{
+  "generated_at": "2026-08-08",
+  "threshold": 5,
+  "aliases": [
+    {
+      "alias": "OPENAI Ltd.",
+      "entity_name": "OpenAI",
+      "entity_hit_count": 10,
+      "source": "auto",
+      "created_at": "2026-08-08"
+    }
+  ]
+}
