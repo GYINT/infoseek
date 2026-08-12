@@ -1,0 +1,245 @@
+version: 1
+description: Infoseek 领域报告模板库（v1.9.0）— 由 6 个独立 .md.j2 文件合并而来
+render_engine: jinja2
+templates:
+  competitor-intel: |-
+    {# domains/templates/competitor-intel.md.j2 — 竞品情报领域模板（v1.9.0） #}
+    # {{ subject }} — 竞品情报报告
+
+    > **领域**：competitor-intel
+    > **模板版本**：v1.9.0
+
+    ## 1. 竞品概览
+
+    {% for s in sources %}
+    - **[{{ loop.index }}] {{ s.title | default("Untitled") }}**（评分 {{ s.score | default(0) }}）
+      - 平台：{{ s.platform | default("-") }}
+      - 链接：{{ s.url | default("-") }}
+      {% if s.snippet %}
+      - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+    {% endfor %}
+
+    ## 2. 功能矩阵对比
+
+    | 功能 | 我方 | 竞品 |
+    |:-----|:-----|:-----|
+    {% for s in sources[:5] %}
+    | 功能 {{ loop.index }} | - | [{{ s.title | truncate(30) }}]({{ s.url }}) |
+    {% endfor %}
+
+    ## 3. 用户舆情
+
+    > 注：用户舆情由用户社区源（Hacker News / Reddit / 即刻 / 知乎）汇总。
+
+    ## 4. SWOT 分析
+
+    - **Strengths**: 优势
+    - **Weaknesses**: 劣势
+    - **Opportunities**: 机会
+    - **Threats**: 威胁
+
+    ## 5. 可借鉴行动点
+
+    {% if is_default_template %}
+    > ⚠️ 使用默认模板
+    {% endif %}
+  default: |-
+    {# domains/templates/default.md.j2 — 默认通用模板（v1.9.0 兜底） #}
+    # {{ subject }} — 调研报告
+
+    > **领域**：{{ domain | default("通用") }}
+    > **模板版本**：v1.9.0（default）
+    > **生成时间**：自动生成
+
+    ## 概述
+
+    本报告基于 Infoseek 多源调研，覆盖 {{ sources_count | default(sources | length) }} 个核心来源。
+
+    ## 来源列表
+
+    {% for s in sources %}
+    ### [{{ loop.index }}] {{ s.title | default("Untitled") }} — 评分 {{ s.score | default(0) }}
+
+    - **平台**: {{ s.platform | default("-") }}
+    - **链接**: {{ s.url | default("-") }}
+    {% if s.snippet %}
+    - **摘要**: {{ s.snippet | truncate(300) }}
+    {% endif %}
+
+    {% endfor %}
+
+    ## 总结
+
+    > 本报告由 Infoseek v1.9.0 生成。
+
+    {% if is_default_template %}
+    > ⚠️ 使用默认模板（领域未识别或指定模板不可用）
+    {% endif %}
+  finance-research: |-
+    {# domains/templates/finance-research.md.j2 — 金融投资领域模板（v1.9.0） #}
+    # {{ subject }} — 投资研究报告
+
+    > **领域**：finance-research
+    > **模板版本**：v1.9.0
+
+    ## 1. 标的基本面
+
+    {% for s in sources %}
+    - **[{{ loop.index }}] {{ s.title | default("Untitled") }}**（评分 {{ s.score | default(0) }}）
+      - 平台：{{ s.platform | default("-") }}
+      - 链接：{{ s.url | default("-") }}
+      {% if s.snippet %}
+      - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+    {% endfor %}
+
+    ## 2. 估值与可比公司
+
+    | 公司 | PE | PB | 来源 |
+    |:-----|:--:|:--:|:-----|
+    {% for s in sources[:5] %}
+    | 标的 {{ loop.index }} | - | - | [{{ s.title | truncate(30) }}]({{ s.url }}) |
+    {% endfor %}
+
+    ## 3. 行业地位
+
+    > 由后续分析生成。
+
+    ## 4. 风险因素
+
+    - 监管风险
+    - 行业风险
+    - 公司风险
+
+    ## 5. 策略建议
+
+    - 短线 / 中线 / 长线买点
+    - 止损位 / 目标位
+
+    {% if is_default_template %}
+    > ⚠️ 使用默认模板
+    {% endif %}
+  market-research: |-
+    {# domains/templates/market-research.md.j2 — 市场研究领域模板（v1.9.0） #}
+    # {{ subject }} — 市场研究报告
+
+    > **领域**：market-research
+    > **模板版本**：v1.9.0
+
+    ## 1. 市场总览
+
+    {% for s in sources %}
+    - **[{{ loop.index }}] {{ s.title | default("Untitled") }}**（评分 {{ s.score | default(0) }}）
+      - 平台：{{ s.platform | default("-") }}
+      - 链接：{{ s.url | default("-") }}
+      {% if s.snippet %}
+      - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+    {% endfor %}
+
+    ## 2. 用户画像 & 需求
+
+    > 注：用户画像由 jieba.analyse.textrank 从 sources 自动提取。
+
+    ## 3. 竞争格局
+
+    | 玩家 | 市占率 | 来源 |
+    |:-----|:-------|:-----|
+    {% for s in sources[:5] %}
+    | 玩家 {{ loop.index }} | - | [{{ s.title | truncate(30) }}]({{ s.url }}) |
+    {% endfor %}
+
+    ## 4. 趋势预测
+
+    > 注：趋势预测需 LLM API（默认不启用）
+
+    ## 5. 战略建议
+
+    > 由调用方结合自有数据生成。
+
+    {% if is_default_template %}
+    > ⚠️ 使用默认模板
+    {% endif %}
+  policy-research: |-
+    {# domains/templates/policy-research.md.j2 — 政策法规领域模板（v1.9.0） #}
+    # {{ subject }} — 政策法规研究报告
+
+    > **领域**：policy-research
+    > **模板版本**：v1.9.0
+
+    ## 1. 政策核心内容
+
+    {% for s in sources %}
+    - **[{{ loop.index }}] {{ s.title | default("Untitled") }}**（评分 {{ s.score | default(0) }}）
+      - 平台：{{ s.platform | default("-") }}
+      - 链接：{{ s.url | default("-") }}
+      {% if s.snippet %}
+      - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+    {% endfor %}
+
+    ## 2. 对企业的直接影响
+
+    - 业务影响
+    - 财务影响
+    - 组织影响
+
+    ## 3. 合规要点清单
+
+    | 要点 | 必做 | 红线 | 来源 |
+    |:-----|:----:|:----:|:-----|
+    {% for s in sources[:5] %}
+    | 要点 {{ loop.index }} | ✅ | ❌ | [{{ s.title | truncate(30) }}]({{ s.url }}) |
+    {% endfor %}
+
+    ## 4. 历史政策对比
+
+    > 注：历史政策对比需 infoseek 跨时间调研。
+
+    {% if is_default_template %}
+    > ⚠️ 使用默认模板
+    {% endif %}
+  tech-research: |-
+    {# domains/templates/tech-research.md.j2 — 技术工艺领域模板（v1.9.0） #}
+    # {{ subject }} — 技术工艺调研报告
+
+    > **领域**：tech-research
+    > **模板版本**：v1.9.0
+    > **生成时间**：自动生成
+
+    ## 1. 工艺流程概览
+
+    {% for s in sources %}
+    - **[{{ loop.index }}] {{ s.title | default("Untitled") }}**（评分 {{ s.score | default(0) }}）
+      - 平台：{{ s.platform | default("-") }}
+      - 链接：{{ s.url | default("-") }}
+      {% if s.snippet %}
+      - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+    {% endfor %}
+
+    ## 2. 风险点 & 排查决策树
+
+    按 Infoseek v1.5.0 调研惯例，技术工艺风险通常归为 4 维度：
+    - 维度 ① 设备参数失配（圆盘刀重叠量/侧隙/张力等）
+    - 维度 ② 工艺流程缺陷（工序遗漏/顺序异常）
+    - 维度 ③ 材料板形遗传（来料缺陷）
+    - 维度 ④ 检验拦截失效（QC/QA 失效）
+
+    > 注：本节为调研方向提示，详细内容应由后续工具生成。
+
+    ## 3. 工艺参数推荐表
+
+    | 参数 | 推荐范围 | 来源 | 适用条件 |
+    |:-----|:---------|:-----|:---------|
+    {% for s in sources[:5] %}
+    | 参数 {{ loop.index }} | - | [{{ s.title | truncate(30) }}]({{ s.url }}) | 评分 {{ s.score }} |
+    {% endfor %}
+
+    ## 4. 总结
+
+    本报告基于 {{ sources_count | default(sources | length) }} 个核心源，覆盖 **tech-research** 领域的工艺技术要点。
+    {% if is_default_template %}
+    > ⚠️ 使用默认模板（领域未识别或模板未就绪）
+    {% endif %}
