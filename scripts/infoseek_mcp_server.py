@@ -51,7 +51,7 @@ ARCHIVES_DIR = WORKSPACE / 'infoseek-archives'
 AUTH_TOKEN = os.environ.get('INFOSEEK_AUTH_TOKEN')
 PROTOCOL_VERSION = "2024-11-05"  # MCP 协议版本
 SERVER_NAME = "infoseek-search"
-SERVER_VERSION = "3.0.0"  # v3.0.0 GA: research_v3 + research_stream 工具 + 全 async 路径 + DeepSeek provider
+SERVER_VERSION = "3.1.0"  # v3.1.0: 模板入库（.j2 → templates.yaml）+ pre_publish_check 增强
 
 # ── v1.6.2 新增：审计日志 + 工具调用统计 ──
 import time
@@ -239,7 +239,8 @@ TOOLS = [
         }
     },
     # ═══════════════════════════════════════════════════════════════
-    # 新增 async 工具（11 async + 1 stream = 12 个），backend 已注册、TOOLS list 已补全
+    # v3.0.0 GA 新增工具（11 async + 1 stream = 12 个）
+    # 新增 async 工具（backend 已注册、TOOLS list 已补全）
     # ═══════════════════════════════════════════════════════════════
     {
         "name": "research_v3",
