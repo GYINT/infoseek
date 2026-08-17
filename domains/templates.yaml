@@ -1,13 +1,13 @@
 version: 1
-description: Infoseek 领域报告模板库（v1.9.0）— 由 6 个独立 .md.j2 文件合并而来
+description: Infoseek 领域报告模板库（v3.1.0）— 由 6 个独立 .md.j2 文件合并而来
 render_engine: jinja2
 templates:
   competitor-intel: |-
-    {# domains/templates/competitor-intel.md.j2 — 竞品情报领域模板（v1.9.0） #}
+    {# domains/templates/competitor-intel.md.j2 — 竞品情报领域模板（v3.1.0） #}
     # {{ subject }} — 竞品情报报告
 
     > **领域**：competitor-intel
-    > **模板版本**：v1.9.0
+    > **模板版本**：v3.1.0
 
     ## 1. 竞品概览
 
@@ -45,11 +45,11 @@ templates:
     > ⚠️ 使用默认模板
     {% endif %}
   default: |-
-    {# domains/templates/default.md.j2 — 默认通用模板（v1.9.0 兜底） #}
+    {# domains/templates/default.md.j2 — 默认通用模板（v3.1.0 兜底） #}
     # {{ subject }} — 调研报告
 
     > **领域**：{{ domain | default("通用") }}
-    > **模板版本**：v1.9.0（default）
+    > **模板版本**：v3.1.0（default）
     > **生成时间**：自动生成
 
     ## 概述
@@ -71,17 +71,17 @@ templates:
 
     ## 总结
 
-    > 本报告由 Infoseek v1.9.0 生成。
+    > 本报告由 Infoseek v3.1.0 生成。
 
     {% if is_default_template %}
     > ⚠️ 使用默认模板（领域未识别或指定模板不可用）
     {% endif %}
   finance-research: |-
-    {# domains/templates/finance-research.md.j2 — 金融投资领域模板（v1.9.0） #}
+    {# domains/templates/finance-research.md.j2 — 金融投资领域模板（v3.1.0） #}
     # {{ subject }} — 投资研究报告
 
     > **领域**：finance-research
-    > **模板版本**：v1.9.0
+    > **模板版本**：v3.1.0
 
     ## 1. 标的基本面
 
@@ -121,11 +121,11 @@ templates:
     > ⚠️ 使用默认模板
     {% endif %}
   market-research: |-
-    {# domains/templates/market-research.md.j2 — 市场研究领域模板（v1.9.0） #}
+    {# domains/templates/market-research.md.j2 — 市场研究领域模板（v3.1.0） #}
     # {{ subject }} — 市场研究报告
 
     > **领域**：market-research
-    > **模板版本**：v1.9.0
+    > **模板版本**：v3.1.0
 
     ## 1. 市场总览
 
@@ -162,11 +162,11 @@ templates:
     > ⚠️ 使用默认模板
     {% endif %}
   policy-research: |-
-    {# domains/templates/policy-research.md.j2 — 政策法规领域模板（v1.9.0） #}
+    {# domains/templates/policy-research.md.j2 — 政策法规领域模板（v3.1.0） #}
     # {{ subject }} — 政策法规研究报告
 
     > **领域**：policy-research
-    > **模板版本**：v1.9.0
+    > **模板版本**：v3.1.0
 
     ## 1. 政策核心内容
 
@@ -201,11 +201,11 @@ templates:
     > ⚠️ 使用默认模板
     {% endif %}
   tech-research: |-
-    {# domains/templates/tech-research.md.j2 — 技术工艺领域模板（v1.9.0） #}
+    {# domains/templates/tech-research.md.j2 — 技术工艺领域模板（v3.1.0） #}
     # {{ subject }} — 技术工艺调研报告
 
     > **领域**：tech-research
-    > **模板版本**：v1.9.0
+    > **模板版本**：v3.1.0
     > **生成时间**：自动生成
 
     ## 1. 工艺流程概览
