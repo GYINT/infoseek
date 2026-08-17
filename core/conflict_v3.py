@@ -229,12 +229,12 @@ class ConflictMonitor:
         return self
 
     async def ingest_source_async(self, src: Dict) -> Dict:
-        """v3.0.0 新增：ingest_source 异步版（asyncio.to_thread 包装）"""
+        """ingest_source 异步版（asyncio.to_thread 包装）"""
         import asyncio
         return await asyncio.to_thread(self.ingest_source, src)
 
     async def ingest_all_async(self, sources: List[Dict]) -> 'ConflictMonitor':
-        """v3.0.0 新增：ingest_all 异步版（asyncio.gather 并发）"""
+        """ingest_all 异步版（asyncio.gather 并发）"""
         import asyncio
         # 第一遍：并发所有 ingest_source
         await asyncio.gather(
@@ -243,7 +243,7 @@ class ConflictMonitor:
         return self
 
     async def finalize_async(self, subject: str = '') -> Dict:
-        """v3.0.0 新增：finalize 异步版"""
+        """finalize 异步版"""
         import asyncio
         return await asyncio.to_thread(self.finalize, subject)
 
@@ -294,6 +294,7 @@ class ConflictMonitor:
         result = {
             'conflicts': conflicts,
             'raw_claims': len(self.session_claims),
+            'total': len(conflicts),
             'version': '3.0.0',   # 保持与 v2.3.0 同构（research 输出不变）
             'subject': subject,
             'total_sources': len(session_sources),
@@ -327,10 +328,10 @@ def detect_conflicts_v3(sources: List[Dict], subject: str = '') -> Dict:
 
 
 async def detect_conflicts_v3_async(sources: List[Dict], subject: str = '') -> Dict:
-    """v3.0.0 新增：detect_conflicts_v3 异步版
+    """detect_conflicts_v3 异步版
 
     v2.7.3 之前 detect_conflicts_v3 在 async 上下文会阻塞 event loop（CPU 密集 NER）
-    v3.0.0 改为 asyncio.to_thread 包装同步实现，event loop 不阻塞
+    改为 asyncio.to_thread 包装同步实现，event loop 不阻塞
 
     用法：
         conflicts = await detect_conflicts_v3_async(sources, subject)
