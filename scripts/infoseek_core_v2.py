@@ -218,7 +218,7 @@ def detect_conflicts(sources: List[Dict], subject: str = '') -> Dict:
 
         v1_result['v2_entity_coverage'] = coverage_data
 
-    v1_result['version'] = '3.0.0'
+    v1_result['version'] = '3.1.0'
     return v1_result
 
 
@@ -394,11 +394,20 @@ def research(subject: str,
             sync = WikidataSync()
             # 仅检查 subject 在 Wikidata 是否存在（轻量验证）
             exists = sync.verify_existence(subject)
-            result['wikidata_verified'] = {
-                'subject': subject,
-                'exists': exists,
-                'available': True,
-            }
+            if exists is None:
+                result['wikidata_verified'] = {
+                    'subject': subject,
+                    'exists': False,
+                    'status': 'query_failed',
+                    'available': False,
+                }
+            else:
+                result['wikidata_verified'] = {
+                    'subject': subject,
+                    'exists': exists,
+                    'status': 'verified',
+                    'available': True,
+                }
         except Exception as e:
             result['wikidata_verified'] = {'available': False, 'error': str(e)}
     else:
@@ -590,7 +599,7 @@ async def async_research(subject: str,
                     url_entities.append(txt[:20] if txt else subject)
                 verify_results = await sync.verify_batch_async([subject] + url_entities)
                 return {
-                    'subject_verified': verify_results.get(subject, False),
+                    'subject_verified': bool(verify_results.get(subject)),
                     'sources_verified': sum(1 for v in verify_results.values() if v),
                     'available': True,
                 }
@@ -856,7 +865,7 @@ async def streaming_research(subject: str,
                     url_entities.append(txt[:20] if txt else subject)
                 verify_results = await sync.verify_batch_async([subject] + url_entities)
                 return {
-                    'subject_verified': verify_results.get(subject, False),
+                    'subject_verified': bool(verify_results.get(subject)),
                     'sources_verified': sum(1 for v in verify_results.values() if v),
                     'available': True,
                 }
