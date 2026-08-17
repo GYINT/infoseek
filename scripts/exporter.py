@@ -223,7 +223,7 @@ def to_lobehub_skill(report: dict) -> str:
         'description': description,
         'tags': [domain, 'research', 'infoseek'],
         'version': '1.0.0',
-        'author': 'Forka',
+        'author': 'Infoseek Team',
         'homepage': 'https://github.com/infoseek/infoseek',
         'config': {
             'domain': domain,
