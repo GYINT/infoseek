@@ -102,10 +102,11 @@ class WikidataSync:
 
         return entities
 
-    def verify_existence(self, entity_name: str) -> bool:
-        """Wikidata 验证实体存在
+    def verify_existence(self, entity_name: str) -> Optional[bool]:
+        """Wikidata 验证实体存在（三态返回）
 
         用于 v2.1.0 entity_tracker 冷条目验证
+        返回：True=查询成功且存在；False=查询成功但不存在；None=查询失败（网络/超时）
         """
         sparql = f"""
         SELECT ?item WHERE {{
@@ -113,8 +114,8 @@ class WikidataSync:
         }} LIMIT 1
         """
         result = self._query(sparql)
-        if not result:
-            return False
+        if result is None:
+            return None  # 查询失败（网络/超时），区别于"确认不存在"
         return len(result.get('results', {}).get('bindings', [])) > 0
 
     async def verify_existence_async(self, entity_name: str) -> bool:
@@ -146,9 +147,9 @@ class WikidataSync:
             try:
                 return await asyncio.to_thread(self.verify_existence, entity_name)
             except Exception:
-                return False
+                return None
         except Exception:
-            return False
+            return None
 
     async def verify_batch_async(self, entity_names: List[str]) -> Dict[str, bool]:
         """v2.5.0 新增：批量并发验证（asyncio.gather）"""
