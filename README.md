@@ -2,7 +2,7 @@
 
 > 端到端内容智能采集与调研工作流。把"信息发现 + 内容采集 + 智能融合"封装成可复用的调研流水线。
 
-[![Version](https://img.shields.io/badge/version-3.0.0-blue)](#)
+[![Version](https://img.shields.io/badge/version-3.1.0-blue)](#)
 [![MCP](https://img.shields.io/badge/MCP-25%20tools-blueviolet)](#)
 [![License](https://img.shields.io/badge/license-MIT-green)](#)
 
