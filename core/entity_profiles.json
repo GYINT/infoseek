@@ -16,8 +16,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 133,
+    "last_seen": "2026-08-17",
+    "hit_total": 168,
     "conflict_refs": [
       "v3_5c41bc4f",
       "v3_16b740c7",
@@ -57,8 +57,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 299,
+    "last_seen": "2026-08-17",
+    "hit_total": 347,
     "conflict_refs": [
       "v3_cf819c88",
       "v3_77165582",
@@ -93,8 +93,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 42,
+    "last_seen": "2026-08-17",
+    "hit_total": 52,
     "conflict_refs": [
       "v3_29356b8e",
       "v3_4d7040fd",
@@ -129,8 +129,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 42,
+    "last_seen": "2026-08-17",
+    "hit_total": 52,
     "conflict_refs": []
   },
   "LoRA": {
@@ -144,8 +144,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 42,
+    "last_seen": "2026-08-17",
+    "hit_total": 52,
     "conflict_refs": [
       "v3_9bd3becc",
       "v3_bb096d5b",
@@ -180,8 +180,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 42,
+    "last_seen": "2026-08-17",
+    "hit_total": 52,
     "conflict_refs": []
   },
   "Anthropic": {
@@ -195,8 +195,8 @@
     ],
     "source_domains": [],
     "first_seen": "2026-08-08",
-    "last_seen": "2026-08-12",
-    "hit_total": 30,
+    "last_seen": "2026-08-17",
+    "hit_total": 38,
     "conflict_refs": [
       "v3_e1b472c2",
       "v3_584f11e0",
@@ -227,12 +227,18 @@
       "OpenAI",
       "主题",
       "GPT-5",
-      "Anthropic"
+      "Anthropic",
+      "Excel终身会员",
+      "学习资料永久共享",
+      "Excel星球",
+      "公众号",
+      "AhaExcel",
+      "Kevin"
     ],
     "source_domains": [],
     "first_seen": "2026-08-10",
-    "last_seen": "2026-08-12",
-    "hit_total": 27,
+    "last_seen": "2026-08-17",
+    "hit_total": 40,
     "conflict_refs": [
       "v3_fa0fad8b",
       "v3_b4504606",
@@ -255,5 +261,21 @@
       "v3_749e9782",
       "v3_c6ddbf88"
     ]
+  },
+  "快手": {
+    "entity_name": "快手",
+    "entity_type": "INTERNET",
+    "topics": [
+      "Excel终身会员",
+      "学习资料永久共享",
+      "Excel星球",
+      "公众号",
+      "AhaExcel"
+    ],
+    "source_domains": [],
+    "first_seen": "2026-08-17",
+    "last_seen": "2026-08-17",
+    "hit_total": 1,
+    "conflict_refs": []
   }
 }
