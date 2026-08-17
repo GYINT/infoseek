@@ -86,7 +86,7 @@ PROVIDERS = [
         api_key_env='KIMI_API_KEY',  # 用 KIMI_API_KEY 兼容 MOONSHOT_API_KEY
         endpoint='https://api.scnet.cn/api/llm/v1',  # 国家超算中心（NSCC）网关
         mock_supported=True,
-        model='Kimi-K2.6',  # 注意大小写 + 点
+        model='Kimi-K2.6',  # 国家超算中心 K2.6 模型（注意大小写 + 点）
         openai_compatible=True,  # 标记走 OpenAI 客户端
         max_retries=3,  # 国家超算中心转发偶发超时，加重试
     ),
