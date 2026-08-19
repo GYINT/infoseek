@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "name_for_model": "infoseek_research",
+  "name_for_human": "Infoseek 调研",
+  "description_for_model": "输入行业/主题/人名进行多源调研，输出结构化 Markdown 报告。提供 research_v3（端到端调研）与 research_stream（流式）等 13 个工具。",
+  "description_for_human": "端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并）、跨源融合分析，最终输出结构化 Markdown 报告（观点+数据+来源），可选自动归档到 `infoseek-archives/` 长期沉淀。适用：",
+  "auth": {
+    "type": "service_http",
+    "key": "Authorization",
+    "sub_type": "token",
+    "payload": {
+      "key": "Authorization",
+      "service_token": "",
+      "location": "Header"
+    }
+  },
+  "logo_url": "http://127.0.0.1:8765/icon.png",
+  "api": {
+    "type": "openapi",
+    "file": "openapi.json"
+  },
+  "common_params": {}
+}
