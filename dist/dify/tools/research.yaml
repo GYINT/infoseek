@@ -1,0 +1,33 @@
+# 工具定义（v1.0.0 规范对齐；其余 MCP 工具按同构扩展）
+identity:
+  name: research
+  author: infoseek
+  label:
+    en_US: Research
+    zh_Hans: 调研
+  description:
+    human:
+      en_US: End-to-end research on a subject/industry/person.
+      zh_Hans: 对行业/主题/人名进行端到端调研。
+    llm: 输入 subject 进行多源调研，输出结构化 Markdown 报告（观点+数据+来源）。
+parameters:
+  - name: subject
+    type: string
+    required: true
+    label:
+      en_US: Subject
+      zh_Hans: 调研主题
+    human_description:
+      en_US: The subject to research.
+      zh_Hans: 需要调研的主题/行业/人名。
+    llm_description: 调研主题，支持行业/主题/人名。
+    form: llm
+  - name: max_sources
+    type: number
+    required: false
+    label:
+      en_US: Max Sources
+    form: form
+extra:
+  python:
+    source: tools/research.py
