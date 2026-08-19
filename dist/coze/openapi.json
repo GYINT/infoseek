@@ -1,0 +1,707 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Infoseek Research API",
+    "description": "infoseek REST 桥（v1.0.0）。13 个规范工具映射为 POST /tools/<name>；远程托管：python scripts/infoseek_host.py start",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8765"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/tools/research_v3": {
+      "post": {
+        "operationId": "research_v3",
+        "summary": "异步研究（async_research 包装，一次性完整结果；流式请用 research_stream）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "description": "调研主题（必填）"
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    },
+                    "description": "来源列表"
+                  },
+                  "domain": {
+                    "type": "string",
+                    "description": "手动指定领域"
+                  },
+                  "output_format": {
+                    "type": "string",
+                    "enum": [
+                      "md",
+                      "json",
+                      "csv",
+                      "lobehub"
+                    ],
+                    "default": "md"
+                  },
+                  "lite": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "v2.4.0 轻量模式"
+                  }
+                },
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/research_stream": {
+      "post": {
+        "operationId": "research_stream",
+        "summary": "流式研究（7 步 yield 同步收集；同步 JSON-RPC 下收集全部 yield，SSE 客户端可享受首步优势）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "description": "调研主题（必填）"
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    },
+                    "description": "来源列表"
+                  },
+                  "domain": {
+                    "type": "string",
+                    "description": "手动指定领域"
+                  },
+                  "output_format": {
+                    "type": "string",
+                    "enum": [
+                      "md",
+                      "json",
+                      "csv",
+                      "lobehub"
+                    ],
+                    "default": "md"
+                  },
+                  "lite": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "v2.4.0 轻量模式"
+                  }
+                },
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/search_anchors_async": {
+      "post": {
+        "operationId": "search_anchors_async",
+        "summary": "异步锚点发现（asyncio.to_thread 包装）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "depth": {
+                    "type": "integer",
+                    "default": 2,
+                    "minimum": 1,
+                    "maximum": 3
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/fetch_content_async": {
+      "post": {
+        "operationId": "fetch_content_async",
+        "summary": "异步内容采集（4 级降级提取）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "format": {
+                    "type": "string",
+                    "enum": [
+                      "md",
+                      "json",
+                      "txt"
+                    ],
+                    "default": "md"
+                  },
+                  "max_retries": {
+                    "type": "integer",
+                    "default": 3
+                  }
+                },
+                "required": [
+                  "url"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/save_archive_async": {
+      "post": {
+        "operationId": "save_archive_async",
+        "summary": "异步存档归档",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "description": "调研主题（必填）"
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "来源 URL（必填）"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string",
+                    "description": "正文内容"
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "description": "附加元数据"
+                  }
+                },
+                "required": [
+                  "subject",
+                  "url",
+                  "title",
+                  "content"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/check_dedup_async": {
+      "post": {
+        "operationId": "check_dedup_async",
+        "summary": "异步 URL 去重检查",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/dedup_stats_async": {
+      "post": {
+        "operationId": "dedup_stats_async",
+        "summary": "异步任务报告",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/fuse_analysis_async": {
+      "post": {
+        "operationId": "fuse_analysis_async",
+        "summary": "异步融合分析",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject": {
+                    "type": "string"
+                  },
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "required": [
+                  "subject"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/cross_subject_analysis_async": {
+      "post": {
+        "operationId": "cross_subject_analysis_async",
+        "summary": "异步跨主题关联分析",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "subject_a": {
+                    "type": "string"
+                  },
+                  "subject_b": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "subject_a",
+                  "subject_b"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/summarize_content_async": {
+      "post": {
+        "operationId": "summarize_content_async",
+        "summary": "异步文本摘要 + 关键词提取（零依赖兜底，可选 LLM 增强）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "max_len": {
+                    "type": "integer",
+                    "default": 300
+                  },
+                  "prefer": {
+                    "type": "string",
+                    "enum": [
+                      "auto",
+                      "summa",
+                      "jieba",
+                      "llm"
+                    ],
+                    "default": "auto"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/conflict_detection_async": {
+      "post": {
+        "operationId": "conflict_detection_async",
+        "summary": "异步跨源事实冲突检测",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "sources": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "subject": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "sources"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/score_source_async": {
+      "post": {
+        "operationId": "score_source_async",
+        "summary": "异步 v2 源评分",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  },
+                  "source": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "query",
+                  "source"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    },
+    "/tools/score_contradiction_async": {
+      "post": {
+        "operationId": "score_contradiction_async",
+        "summary": "异步矛盾评分（含 severity 等级）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "claim_a": {
+                    "type": "object"
+                  },
+                  "claim_b": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "claim_a",
+                  "claim_b"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "工具结果",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数/调用错误"
+          },
+          "401": {
+            "description": "未授权（需 Bearer token）"
+          }
+        }
+      }
+    }
+  }
+}
