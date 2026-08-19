@@ -1,0 +1,1 @@
+ima.copilot 注册清单（v1.0.0 可移植路径：${INFOSEEK_ROOT}/${HOME} 安装时展开）。
