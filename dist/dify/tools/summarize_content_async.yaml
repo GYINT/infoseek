@@ -1,0 +1,49 @@
+# 工具定义（v1.0.1 G8 自动生成，与 MCP TOOLS 对齐）
+identity:
+  name: summarize_content_async
+  author: infoseek
+  label:
+    en_US: summarize_content_async
+    zh_Hans: summarize_content_async
+  description:
+    human:
+      en_US: （v1.0.1 由 sync 定义生成，schema 字段描述完整）文本摘要 + 关键词提取 (v1.7.0+)。主路径: summa TextRank（英文友好）+ jieba Textrank（v1.7.1 中文优化）+ LLM API 兜底（需 API Key）。无 API 时自动降级到文本截断。
+      zh_Hans: （v1.0.1 由 sync 定义生成，schema 字段描述完整）文本摘要 + 关键词提取 (v1.7.0+)。主路径: summa TextRank（英文友好）+ jieba Textrank（v1.7.1 中文优化）+ LLM API 兜底（需 API Key）。无 API 时自动降级到文本截断。
+    llm: （v1.0.1 由 sync 定义生成，schema 字段描述完整）文本摘要 + 关键词提取 (v1.7.0+)。主路径: summa TextRank（英文友好）+ jieba Textrank（v1.7.1 中文优化）+ LLM API 兜底（需 API Key）。无 API 时自动降级到文本截断。
+parameters:
+  - name: text
+    type: string
+    required: true
+    label:
+      en_US: text
+      zh_Hans: text
+    human_description:
+      en_US: 待摘要文本（必填）
+      zh_Hans: 待摘要文本（必填）
+    llm_description: 待摘要文本（必填）
+    form: llm
+  - name: max_words
+    type: number
+    required: false
+    label:
+      en_US: max_words
+      zh_Hans: max_words
+    human_description:
+      en_US: 摘要最大词数
+      zh_Hans: 摘要最大词数
+    llm_description: 摘要最大词数
+    form: llm
+  - name: prefer
+    type: string
+    required: false
+    label:
+      en_US: prefer
+      zh_Hans: prefer
+    human_description:
+      en_US: 首选路径（auto=自动检测语言，jieba=中文专用，llm 仅在配置 API Key 时生效）
+      zh_Hans: 首选路径（auto=自动检测语言，jieba=中文专用，llm 仅在配置 API Key 时生效）
+    llm_description: 首选路径（auto=自动检测语言，jieba=中文专用，llm 仅在配置 API Key 时生效）
+    form: llm
+extra:
+  python:
+    source: tools/summarize_content_async.py
