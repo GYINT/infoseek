@@ -1,0 +1,38 @@
+# 工具定义（v1.0.1 G8 自动生成，与 MCP TOOLS 对齐）
+identity:
+  name: cross_subject_analysis_async
+  author: infoseek
+  label:
+    en_US: cross_subject_analysis_async
+    zh_Hans: cross_subject_analysis_async
+  description:
+    human:
+      en_US: （v1.0.1 由 sync 定义生成，schema 字段描述完整）跨主题关联分析 (v1.6.0 新增)。输入多个调研主题，输出共享源/共同作者/共有概念等关联信息。min_correlation 过滤低相关主题对。
+      zh_Hans: （v1.0.1 由 sync 定义生成，schema 字段描述完整）跨主题关联分析 (v1.6.0 新增)。输入多个调研主题，输出共享源/共同作者/共有概念等关联信息。min_correlation 过滤低相关主题对。
+    llm: （v1.0.1 由 sync 定义生成，schema 字段描述完整）跨主题关联分析 (v1.6.0 新增)。输入多个调研主题，输出共享源/共同作者/共有概念等关联信息。min_correlation 过滤低相关主题对。
+parameters:
+  - name: subjects
+    type: array
+    required: true
+    label:
+      en_US: subjects
+      zh_Hans: subjects
+    human_description:
+      en_US: 主题列表（≥2）
+      zh_Hans: 主题列表（≥2）
+    llm_description: 主题列表（≥2）
+    form: llm
+  - name: min_correlation
+    type: number
+    required: false
+    label:
+      en_US: min_correlation
+      zh_Hans: min_correlation
+    human_description:
+      en_US: 最小共享源数阈值
+      zh_Hans: 最小共享源数阈值
+    llm_description: 最小共享源数阈值
+    form: llm
+extra:
+  python:
+    source: tools/cross_subject_analysis_async.py
