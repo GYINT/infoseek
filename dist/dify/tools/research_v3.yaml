@@ -1,0 +1,71 @@
+# 工具定义（v1.0.1 G8 自动生成，与 MCP TOOLS 对齐）
+identity:
+  name: research_v3
+  author: infoseek
+  label:
+    en_US: research_v3
+    zh_Hans: research_v3
+  description:
+    human:
+      en_US: 异步研究（async_research 包装，一次性完整结果；流式请用 research_stream）。
+      zh_Hans: 异步研究（async_research 包装，一次性完整结果；流式请用 research_stream）。
+    llm: 异步研究（async_research 包装，一次性完整结果；流式请用 research_stream）。
+parameters:
+  - name: subject
+    type: string
+    required: true
+    label:
+      en_US: subject
+      zh_Hans: subject
+    human_description:
+      en_US: 调研主题（必填）
+      zh_Hans: 调研主题（必填）
+    llm_description: 调研主题（必填）
+    form: llm
+  - name: sources
+    type: array
+    required: false
+    label:
+      en_US: sources
+      zh_Hans: sources
+    human_description:
+      en_US: 来源列表
+      zh_Hans: 来源列表
+    llm_description: 来源列表
+    form: llm
+  - name: domain
+    type: string
+    required: false
+    label:
+      en_US: domain
+      zh_Hans: domain
+    human_description:
+      en_US: 手动指定领域
+      zh_Hans: 手动指定领域
+    llm_description: 手动指定领域
+    form: llm
+  - name: output_format
+    type: string
+    required: false
+    label:
+      en_US: output_format
+      zh_Hans: output_format
+    human_description:
+      en_US: 
+      zh_Hans: 
+    llm_description: 
+    form: llm
+  - name: lite
+    type: boolean
+    required: false
+    label:
+      en_US: lite
+      zh_Hans: lite
+    human_description:
+      en_US: v2.4.0 轻量模式
+      zh_Hans: v2.4.0 轻量模式
+    llm_description: v2.4.0 轻量模式
+    form: form
+extra:
+  python:
+    source: tools/research_v3.py
