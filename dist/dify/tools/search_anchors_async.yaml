@@ -1,0 +1,49 @@
+# 工具定义（v1.0.1 G8 自动生成，与 MCP TOOLS 对齐）
+identity:
+  name: search_anchors_async
+  author: infoseek
+  label:
+    en_US: search_anchors_async
+    zh_Hans: search_anchors_async
+  description:
+    human:
+      en_US: （v1.0.1 由 sync 定义生成，schema 字段描述完整）多渠道并行锚点发现。从行业/主题/人名嗅探信息源，支持 depth（1-3层）和 sources 列表。返回结构化候选源列表，每项含 url/title/score。
+      zh_Hans: （v1.0.1 由 sync 定义生成，schema 字段描述完整）多渠道并行锚点发现。从行业/主题/人名嗅探信息源，支持 depth（1-3层）和 sources 列表。返回结构化候选源列表，每项含 url/title/score。
+    llm: （v1.0.1 由 sync 定义生成，schema 字段描述完整）多渠道并行锚点发现。从行业/主题/人名嗅探信息源，支持 depth（1-3层）和 sources 列表。返回结构化候选源列表，每项含 url/title/score。
+parameters:
+  - name: subject
+    type: string
+    required: true
+    label:
+      en_US: subject
+      zh_Hans: subject
+    human_description:
+      en_US: 调研主题（必填）
+      zh_Hans: 调研主题（必填）
+    llm_description: 调研主题（必填）
+    form: llm
+  - name: depth
+    type: number
+    required: false
+    label:
+      en_US: depth
+      zh_Hans: depth
+    human_description:
+      en_US: 关键词展开深度
+      zh_Hans: 关键词展开深度
+    llm_description: 关键词展开深度
+    form: llm
+  - name: sources
+    type: array
+    required: false
+    label:
+      en_US: sources
+      zh_Hans: sources
+    human_description:
+      en_US: 限定渠道（web/kb/note），默认全开
+      zh_Hans: 限定渠道（web/kb/note），默认全开
+    llm_description: 限定渠道（web/kb/note），默认全开
+    form: llm
+extra:
+  python:
+    source: tools/search_anchors_async.py
