@@ -1,0 +1,25 @@
+# Dify Tool Provider（v1.0.1：16 工具全量注册，含 qcm_query 跨 skill 协同）
+identity:/n  author: infoseek
+  name: infoseek
+  label:/n    en_US: Infoseek Research
+    zh_Hans: Infoseek 调研
+  description:/n    en_US: 端到端内容智能采集与调研工作流，16 个工具（async 调研 + research_v3/stream + Key 管理 + 用量报表 + QCM 协同）。
+    zh_Hans: 端到端内容智能采集与调研工作流，16 个工具（async 调研 + research_v3/stream + Key 管理 + 用量报表 + QCM 协同）。
+  icon: icon.svg
+credentials_for_provider: {}
+tools:/n  - tools/research_v3.yaml
+  - tools/research_stream.yaml
+  - tools/manage_keys.yaml
+  - tools/key_usage.yaml
+  - tools/qcm_query.yaml
+  - tools/search_anchors_async.yaml
+  - tools/fetch_content_async.yaml
+  - tools/save_archive_async.yaml
+  - tools/check_dedup_async.yaml
+  - tools/dedup_stats_async.yaml
+  - tools/fuse_analysis_async.yaml
+  - tools/cross_subject_analysis_async.yaml
+  - tools/summarize_content_async.yaml
+  - tools/conflict_detection_async.yaml
+  - tools/score_source_async.yaml
+  - tools/score_contradiction_async.yaml
