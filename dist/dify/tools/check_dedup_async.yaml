@@ -1,0 +1,27 @@
+# 工具定义（v1.0.1 G8 自动生成，与 MCP TOOLS 对齐）
+identity:
+  name: check_dedup_async
+  author: infoseek
+  label:
+    en_US: check_dedup_async
+    zh_Hans: check_dedup_async
+  description:
+    human:
+      en_US: （v1.0.1 由 sync 定义生成，schema 字段描述完整）URL 去重检查。返回是否已在去重 DB 中。
+      zh_Hans: （v1.0.1 由 sync 定义生成，schema 字段描述完整）URL 去重检查。返回是否已在去重 DB 中。
+    llm: （v1.0.1 由 sync 定义生成，schema 字段描述完整）URL 去重检查。返回是否已在去重 DB 中。
+parameters:
+  - name: url
+    type: string
+    required: true
+    label:
+      en_US: url
+      zh_Hans: url
+    human_description:
+      en_US: 
+      zh_Hans: 
+    llm_description: 
+    form: llm
+extra:
+  python:
+    source: tools/check_dedup_async.py
