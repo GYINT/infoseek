@@ -1,0 +1,60 @@
+# 工具定义（v1.0.1 G8 自动生成，与 MCP TOOLS 对齐）
+identity:
+  name: fuse_analysis_async
+  author: infoseek
+  label:
+    en_US: fuse_analysis_async
+    zh_Hans: fuse_analysis_async
+  description:
+    human:
+      en_US: （v1.0.1 由 sync 定义生成，schema 字段描述完整）融合分析（多源交叉）。输入 subject 与 sources 列表，输出分层根因表。min_score 过滤低质源。v1.8.1 增强：export_formats 参数自动生成 md/json/csv/claude/openai/lobehub 多种格式。
+      zh_Hans: （v1.0.1 由 sync 定义生成，schema 字段描述完整）融合分析（多源交叉）。输入 subject 与 sources 列表，输出分层根因表。min_score 过滤低质源。v1.8.1 增强：export_formats 参数自动生成 md/json/csv/claude/openai/lobehub 多种格式。
+    llm: （v1.0.1 由 sync 定义生成，schema 字段描述完整）融合分析（多源交叉）。输入 subject 与 sources 列表，输出分层根因表。min_score 过滤低质源。v1.8.1 增强：export_formats 参数自动生成 md/json/csv/claude/openai/lobehub 多种格式。
+parameters:
+  - name: subject
+    type: string
+    required: true
+    label:
+      en_US: subject
+      zh_Hans: subject
+    human_description:
+      en_US: 
+      zh_Hans: 
+    llm_description: 
+    form: llm
+  - name: sources
+    type: array
+    required: true
+    label:
+      en_US: sources
+      zh_Hans: sources
+    human_description:
+      en_US: 源列表 [{url, content, score}, ...]
+      zh_Hans: 源列表 [{url, content, score}, ...]
+    llm_description: 源列表 [{url, content, score}, ...]
+    form: llm
+  - name: min_score
+    type: number
+    required: false
+    label:
+      en_US: min_score
+      zh_Hans: min_score
+    human_description:
+      en_US: 
+      zh_Hans: 
+    llm_description: 
+    form: llm
+  - name: export_formats
+    type: array
+    required: false
+    label:
+      en_US: export_formats
+      zh_Hans: export_formats
+    human_description:
+      en_US: v1.8.1 新增：自动导出的格式列表（空=不导出）
+      zh_Hans: v1.8.1 新增：自动导出的格式列表（空=不导出）
+    llm_description: v1.8.1 新增：自动导出的格式列表（空=不导出）
+    form: llm
+extra:
+  python:
+    source: tools/fuse_analysis_async.py
