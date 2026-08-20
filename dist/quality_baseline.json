@@ -1,0 +1,234 @@
+{
+  "version": "1.2.0",
+  "generated_at": "2026-08-20 11:18 UTC",
+  "skip_tests": false,
+  "all_ok": true,
+  "steps": {
+    "compile": {
+      "ok": true,
+      "detail": "26 files"
+    },
+    "build_check": {
+      "ok": true,
+      "detail": "manifest v1.2.0 | 1.2.X 四大支柱: FreshnessCron 验证 / 召回增强 / L3-L4 抓取 / perf 10k"
+    },
+    "contracts": {
+      "ok": true,
+      "detail": "references/ 11 份"
+    },
+    "test_suites": {
+      "ok": true,
+      "detail": "26 通过 / 0 失败 / 26 总计（新增 freshness_cron/recall_enhance/fetch_levels 三套件）"
+    }
+  },
+  "test_suite_detail": [
+    {
+      "suite": "test_async_tools.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "exit=0",
+      "exit": 0,
+      "elapsed": 12.5
+    },
+    {
+      "suite": "test_boundary_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== L2 能力边界: 12 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 17.3
+    },
+    {
+      "suite": "test_compat_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== L7 兼容性: 5 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 0.6
+    },
+    {
+      "suite": "test_correctness_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== L1 正确性: 18 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 18.6
+    },
+    {
+      "suite": "test_deep_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== 深度测试结果: 22 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 20.4
+    },
+    {
+      "suite": "test_domain_orchestrator_v200.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "结果: 13 PASS / 0 FAIL",
+      "exit": 0,
+      "elapsed": 1.4
+    },
+    {
+      "suite": "test_e2e_scenarios_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== E2E 实战场景: 12 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 48.8
+    },
+    {
+      "suite": "test_engine_lifecycle_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== 引擎生命周期测试: 40 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 10.3
+    },
+    {
+      "suite": "test_enricher_zerodep_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== enricher+zerodep 测试: 13 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 1.2
+    },
+    {
+      "suite": "test_fetch_levels_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== 抓取层 L3/L4 测试: 26 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 0.5
+    },
+    {
+      "suite": "test_freshness_cron_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== FreshnessCron 冒烟: 23 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 0.6
+    },
+    {
+      "suite": "test_infoseek_v231.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== v2.3.1 验证结果: 10 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 17.9
+    },
+    {
+      "suite": "test_infoseek_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== v2.4.0 验证结果: 15 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 17.7
+    },
+    {
+      "suite": "test_key_manager_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== KeyManager 测试: 28 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 1.2
+    },
+    {
+      "suite": "test_mcp_snapshot_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== MCP 快照测试: 10 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 5.7
+    },
+    {
+      "suite": "test_pending_conflict_anchor_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== pending+conflict+anchor 测试: 20 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 1.0
+    },
+    {
+      "suite": "test_qcm_bridge_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== QCM 桥接测试: 10 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 1.4
+    },
+    {
+      "suite": "test_recall_enhance_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== 召回增强测试: 16 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 1.8
+    },
+    {
+      "suite": "test_reliability_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== L3 可靠性: 11 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 47.8
+    },
+    {
+      "suite": "test_search_engines.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "exit=0",
+      "exit": 0,
+      "elapsed": 6.7
+    },
+    {
+      "suite": "test_security_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== L6 安全: 5 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 17.2
+    },
+    {
+      "suite": "test_stability_v240.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== L4 稳定性: 9 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 5.2
+    },
+    {
+      "suite": "test_state_ner_v101.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== state_dir+ner 测试: 16 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 0.4
+    },
+    {
+      "suite": "test_streaming_v300.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "=== v3.0.0 GA streaming 专项: 6 PASS / 0 FAIL ===",
+      "exit": 0,
+      "elapsed": 2.3
+    },
+    {
+      "suite": "test_tools_surface.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "exit=0",
+      "exit": 0,
+      "elapsed": 1.7
+    },
+    {
+      "suite": "test_v174_jaccard.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "exit=0",
+      "exit": 0,
+      "elapsed": 1.8
+    }
+  ]
+}
