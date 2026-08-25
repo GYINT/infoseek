@@ -61,6 +61,8 @@ BUILTIN_PROVIDERS: Dict[str, str] = {
     'tavily': 'TAVILY_API_KEY',
     'tinyfish': 'TINYFISH_API_KEY',
     'metaso': 'METASO_API_KEY',
+    # QVeris 能力路由（scripts/qveris_client.py）
+    'qveris': 'QVERIS_API_KEY',
     # 摘要 / MCP 层
     'infoseek_llm': 'INFOSEEK_LLM_API_KEY',
     'auth': 'INFOSEEK_AUTH_TOKEN',
