@@ -1,6 +1,6 @@
 # Infoseek 外部 API Key 清单（API Keys Reference）
 
-> 版本：v1.2.0 ｜ 说明：所有 Key 均为**可选**——不配置时自动降级（LLM 走 mock、搜索层自动跳过限量引擎），核心免费搜索链（DDG/Bing/Wikipedia/Jina）无需任何 Key 即可工作。Key 经 `KeyManager` 归一化管理（加密落盘 + 系统 keyring 后端 + 状态机/熔断/配额），可通过 `keys` CLI 增删查改。
+> 版本：v1.3.0 ｜ 说明：所有 Key 均为**可选**——不配置时自动降级（LLM 走 mock、搜索层自动跳过限量引擎），核心免费搜索链（DDG/Bing/Wikipedia/Jina）无需任何 Key 即可工作。Key 经 `KeyManager` 归一化管理（加密落盘 + 系统 keyring 后端 + 状态机/熔断/配额），可通过 `keys` CLI 增删查改。
 
 ## 一、LLM Provider（核心 `llm_router.py`，用于 LLM 评分/摘要）
 
@@ -24,8 +24,9 @@
 | 智谱搜索 | `ZHIPU_API_KEY` | 搜索（与 LLM 共用 Key） | 国内源覆盖 | https://open.bigmodel.cn |
 | 秘塔 | `METASO_API_KEY` | AI 搜索（金融/国内长尾） | 中文金融内容覆盖 | https://metaso.cn |
 | TinyFish | `TINYFISH_API_KEY` | AI 搜索兜底 | 补充长尾源 | https://tinyfish.io |
+| QVeris | `QVERIS_API_KEY` | 能力路由网络（结构化金融/数据能力：量化/宏观固收/风控/加密/另类信号） | discover/inspect 免费，按调用计 credits（每结果 1 credits 起）；CN key（`sk-cn-`）自动走 `qveris.cn` 合规区 | https://qveris.com（Dashboard/API Keys） |
 
-**效益合计**：免费层（DDG/Bing/Wikipedia/Jina）零 Key 可用；配置任一 AI 引擎 Key 后启用「AI 模式」层（`INFOSEEK_SEARCH_ENGINE=ai`），语义召回质量显著提升；多 Key 自动轮换 + 配额保护（限量引擎仅作兜底保留池，避免烧额度）。
+**效益合计**：免费层（DDG/Bing/Wikipedia/Jina）零 Key 可用；配置任一 AI 引擎 Key 后启用「AI 模式」层（`INFOSEEK_SEARCH_ENGINE=ai`），语义召回质量显著提升；多 Key 自动轮换 + 配额保护（限量引擎仅作兜底保留池，避免烧额度）。QVeris 作为**结构化数据兜底**（金融/宏观/风控等查询在网页召回不足时提供结构化执行），计费受 `INFOSEEK_QVERIS_CALL_BUDGET` 保护。
 
 ## 三、摘要 / 其它
 
