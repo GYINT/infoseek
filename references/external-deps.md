@@ -1,6 +1,6 @@
 # Infoseek 外部依赖清单（External Dependencies）
 
-> 版本：v1.2.0 ｜ 说明：全部第三方依赖均为**可选降级**设计——缺失时自动走标准库兜底路径，不阻断核心流程（零依赖哲学）。`requirements.txt` 为核心 + 文本分析 + 可选 LLM；`requirements-extra.txt` 为浏览器抓取。
+> 版本：v1.3.0 ｜ 说明：全部第三方依赖均为**可选降级**设计——缺失时自动走标准库兜底路径，不阻断核心流程（零依赖哲学）。`requirements.txt` 为核心 + 文本分析 + 可选 LLM；`requirements-extra.txt` 为浏览器抓取。
 
 ## 一、必需依赖（直接 import，缺失即相关功能不可用）
 
@@ -33,6 +33,7 @@
 ## 四、标准库能力（无第三方依赖）
 
 - **搜索链**：urllib 实现 DDG HTML / Bing RSS / Wikipedia opensearch / Jina / CN 网页兜底
+- **QVeris 能力路由**（v1.3）：urllib 直连 `https://qveris.ai/api/v1`（国际）/ `https://qveris.cn/api/v1`（CN，sk-cn- key 自动选区），零第三方依赖；Redis 式体质无需安装
 - **相关性过滤**：`anchor_adapter.compute_semantic_similarity`（Jaccard 语义相似）
 - **零依赖 NLP**：`infoseek_zerodep_nlp.py`（语言检测 / 句子切分 / ngram 关键词共识 / 摘要）——jieba/summa 全缺时的最终防线
 - **冲突检测 / 实体识别 / 热度预测**：纯标准库（conflict_v3 / ner / entity_heat）
