@@ -329,21 +329,45 @@ def _search_cn_web(query: str, max_results: int = 5) -> list:
     return out
 
 
+def _search_qveris(query: str, max_results: int = 5) -> list:
+    """QVeris 能力路由引擎（v1.2 消费者接入）。
+
+    结构化数据能力（金融/宏观/风控/加密/另类信号）：discover → call 返回 JSON 摘要。
+    - 无 key → []（零网络开销）
+    - 配额/认证错误**上抛**（QVerisQuotaError=429 / QVerisAuthError=401/403），
+      由 _call_engine → engine_lifecycle.classify 分类（quota 禁用 / forbidden）
+    - 结果 url 为 qveris://exec/<id> 伪 URL（结构化数据，非网页，带 tool_id/provider/cost）
+    """
+    try:
+        from qveris_client import search as qv_search
+        from qveris_client import QVerisQuotaError, QVerisAuthError
+    except ImportError:
+        return []
+    try:
+        return qv_search(query, max_results=max_results)
+    except (QVerisQuotaError, QVerisAuthError):
+        raise
+    except Exception as e:
+        log.warning(f"[QVeris] 搜索 '{query}' 失败: {e}")
+        return []
+
+
 def _ai_engines() -> list:
-    """AI 键控冗余链：Exa → Tavily → 智谱（国内）→ 秘塔（国内）→ TinyFish。"""
+    """AI 键控冗余链：Exa → Tavily → 智谱（国内）→ 秘塔（国内）→ TinyFish → QVeris（结构化数据）。"""
     return [
         ("Exa", _search_exa),
         ("Tavily", _search_tavily),
         ("Zhipu", _search_zhipu),
         ("Metaso", _search_metaso),
         ("TinyFish", _search_tinyfish),
+        ("QVeris", _search_qveris),
     ]
 
 
 def _has_ai_key() -> bool:
     return any(os.environ.get(k) for k in
                ('EXA_API_KEY', 'TAVILY_API_KEY', 'TINYFISH_API_KEY',
-                'ZHIPU_API_KEY', 'METASO_API_KEY'))
+                'ZHIPU_API_KEY', 'METASO_API_KEY', 'QVERIS_API_KEY'))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -354,7 +378,7 @@ def _has_ai_key() -> bool:
 # 引擎权重表（组间择优；组内保持引擎原始顺序）
 _ENGINE_WEIGHT = {
     'Exa': 1.0, 'DuckDuckGo-HTML': 1.0, 'Bing-RSS': 0.9, 'Zhipu': 0.9,
-    'Tavily': 0.9, 'Jina-AI': 0.8, 'Metaso': 0.8, 'Wikipedia': 0.7,
+    'Tavily': 0.9, 'QVeris': 0.9, 'Jina-AI': 0.8, 'Metaso': 0.8, 'Wikipedia': 0.7,
     'TinyFish': 0.7, 'CN-AI-Web': 0.3,
 }
 
@@ -370,6 +394,7 @@ def _free_engines() -> list:
 _KEY_ENV = {
     'Exa': 'EXA_API_KEY', 'Tavily': 'TAVILY_API_KEY', 'Zhipu': 'ZHIPU_API_KEY',
     'Metaso': 'METASO_API_KEY', 'TinyFish': 'TINYFISH_API_KEY',
+    'QVeris': 'QVERIS_API_KEY',
 }
 
 
