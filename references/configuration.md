@@ -1,6 +1,6 @@
 # Infoseek 配置项参考（Configuration Reference）
 
-> 版本：v1.2.0 ｜ 状态：✅ 已提供 ｜ 全量 env 配置清单
+> 版本：v1.3.0 ｜ 状态：✅ 已提供 ｜ 全量 env 配置清单
 
 ---
 
@@ -97,6 +97,17 @@
 | `TINYFISH_API_KEY` | TinyFish 搜索 |
 | `ZHIPU_API_KEY` | 智谱搜索（与 LLM 共用 key） |
 | `METASO_API_KEY` | 秘塔搜索 |
+| `QVERIS_API_KEY` | QVeris 能力路由（结构化金融/数据能力；CN key 前缀 `sk-cn-`） |
+
+### QVeris 能力路由（v1.3，scripts/qveris_client.py）
+
+| 变量 | 默认 | 用途 |
+|------|------|------|
+| `INFOSEEK_QVERIS_BASE_URL` | 自动选区 | QVeris REST Base；未设置时按 key 前缀自动选区（`sk-cn-`→`https://qveris.cn/api/v1`，其余→`https://qveris.ai/api/v1`） |
+| `INFOSEEK_QVERIS_TIMEOUT` | `5` | HTTP 超时秒数 |
+| `INFOSEEK_QVERIS_CALL_BUDGET` | `3` | 每次 search 最多执行的 call 次数（credits 保护；discover/inspect 免费不计数） |
+
+协议四步（两区一致，Bearer 认证）：`POST /search`（discover，免费）→ `POST /tools/by-ids`（inspect，免费）→ `POST /tools/probe`（预验证，免费）→ `POST /tools/execute`（call，消耗 credits）。CN 区 discover 返回精简结果，客户端自动走 **Discover→Inspect→Call** 补全流程。错误分类 429→quota / 401/403→forbidden，自动进入引擎生命周期。
 
 ### 内容抓取分级（v1.0.1 C2）
 
