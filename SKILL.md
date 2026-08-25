@@ -1,6 +1,6 @@
 ---
 name: infoseek
-version: 1.2.0
+version: 1.3.0
 description: 端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级：静态/渲染/凭证/多媒体）、搜索引擎全生命周期管理（健康/配额/新鲜度自愈）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并）、召回增强（别名扩展/多样性合并/自适应门槛）、跨源融合分析，最终输出结构化 Markdown 报告，可选自动归档。适用：行业调研、趋势分析、竞品分析、市场研究、技术研究、内容采集、报告生成、长期知识库建设。不适用：实时新闻监控、学术文献综述、浏览器自动化爬取、即时聊天对话
 license: MIT
 ---
@@ -177,6 +177,7 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 |------|------|------|
 | `search_web` 降级链 | `scripts/infoseek_pipeline.py` | 多引擎并行 + 层间降级 + 动态保留池；query 别名扩展 / 多样性轮询 / 自适应相关性门槛 |
 | 引擎生命周期 | `scripts/engine_lifecycle.py` | 健康状态机 / 配额追踪 / 认证粘滞 / 新鲜度自愈（配额重置、冷却恢复、API 漂移检测）+ CLI engine-status/reconcile/probe/reset |
+| QVeris 能力路由 | `scripts/qveris_client.py` | 结构化金融/数据能力：discover→inspect→call 全流程，双端点自动选区（sk-cn-→qveris.cn 合规区），429/401 自动进入引擎生命周期 |
 | 4 级抓取 | `scripts/mcp_tools_search.py` | `extraction_level` 1/2/3/4 路由：静态 / playwright 渲染 / KeyManager 凭证注入（仅内存）/ 多媒体 chunk |
 
 ### 4.6 输出导出
@@ -332,7 +333,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
   - 深度测试：`test_deep_v101.py`（单独运行）
 - **运行方式**：`python tests/run_tests.py`（25 标准套件）或逐个直跑；深度 `python tests/test_deep_v101.py`
 - **质量门控**：边界 / 兼容 / 正确性 / 可靠性 / 安全性 / 稳定性 6 维度全覆盖
-- **质量基线**：`dist/quality_baseline.json`（v1.2.0，26/26 套件 all_ok）
+- **质量基线**：`dist/quality_baseline.json`（v1.3.0，26/26 套件 all_ok + 27 项含 deep 全绿）
 
 ---
 
