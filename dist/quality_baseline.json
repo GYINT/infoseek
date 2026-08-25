@@ -1,6 +1,6 @@
 {
-  "version": "1.2.0",
-  "generated_at": "2026-08-20 11:18 UTC",
+  "version": "1.3.0",
+  "generated_at": "2026-08-25 19:55 UTC",
   "skip_tests": false,
   "all_ok": true,
   "steps": {
@@ -10,7 +10,7 @@
     },
     "build_check": {
       "ok": true,
-      "detail": "manifest v1.2.0 | 1.2.X 四大支柱: FreshnessCron 验证 / 召回增强 / L3-L4 抓取 / perf 10k"
+      "detail": "manifest v1.3.0 | 1.3.X 核心: QVeris 能力路由接入（discover→inspect→call / 双端点自动选区）"
     },
     "contracts": {
       "ok": true,
@@ -18,7 +18,7 @@
     },
     "test_suites": {
       "ok": true,
-      "detail": "26 通过 / 0 失败 / 26 总计（新增 freshness_cron/recall_enhance/fetch_levels 三套件）"
+      "detail": "27 通过 / 0 失败 / 27 总计（新增 test_qveris_bridge_v130 套件）"
     }
   },
   "test_suite_detail": [
@@ -229,6 +229,14 @@
       "reason": "exit=0",
       "exit": 0,
       "elapsed": 1.8
+    },
+    {
+      "suite": "test_qveris_bridge_v130.py",
+      "ok": true,
+      "status": "pass",
+      "reason": "exit=0",
+      "exit": 0,
+      "elapsed": 0.1
     }
   ]
 }
