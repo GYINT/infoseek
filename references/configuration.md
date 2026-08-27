@@ -1,6 +1,6 @@
 # Infoseek 配置项参考（Configuration Reference）
 
-> 版本：v1.3.0 ｜ 状态：✅ 已提供 ｜ 全量 env 配置清单
+> 版本：v1.2.0 ｜ 状态：✅ 已提供 ｜ 全量 env 配置清单
 
 ---
 
