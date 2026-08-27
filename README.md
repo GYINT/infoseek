@@ -1,9 +1,9 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v1.3.0 发布版**。
+> 端到端内容智能采集与调研工作流。**v1.2.0 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-1.3.0-blue)](#)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue)](#)
 [![Tests](https://img.shields.io/badge/tests-25%20suites%20PASS-success)](#)
 [![MCP](https://img.shields.io/badge/MCP-15%20tools-blueviolet)](#)
 
@@ -26,17 +26,16 @@ python scripts/infoseek_mcp_server.py
 
 ---
 
-## 🎉 v1.3.0 发布亮点
+## 🎉 v1.2.0 发布亮点
 
 | 能力 | 说明 |
 |------|------|
-| 🔌 **QVeris 能力路由** | 零依赖直连 QVeris REST API：discover→inspect→call 全流程、双端点自动选区（`sk-cn-`→qveris.cn 合规区）、429/401 自动进引擎生命周期、credits 预算保护（`INFOSEEK_QVERIS_CALL_BUDGET`） |
 | 🧭 **搜索引擎全生命周期** | 健康状态机 / 配额追踪 / 认证粘滞 + 新鲜度自愈（配额重置、冷却恢复、API 漂移检测）+ CLI engine-status/reconcile/probe |
 | 🎯 **搜索召回增强** | query 别名扩展 / 跨引擎多样性轮询（防单源垄断）/ 自适应相关性门槛 / 动态层权重 |
 | 🕸️ **4 级抓取** | L1 静态 → L2 浏览器渲染 → L3 凭证辅助（KeyManager 注入，仅内存）→ L4 多媒体 chunk（whisper 可选降级） |
 | 🔑 **Key 管理** | 归一化 Key 管理（多后端 / 熔断 / 多 key 池 / 配额 / keyring / CLI 16 子命令） |
 | ⚡ **perf 10k 基准** | 10k 源近线性扩展（评分 139s / 冲突 89s / research 97s） |
-| ✅ **回归测试** | **26 套件**全绿 + 质量基线 26/26 all_ok |
+| ✅ **回归测试** | **25 套件**全绿 + 质量基线 26/26 all_ok |
 
 ---
 
@@ -114,8 +113,7 @@ async for partial in streaming_research("AI", sources, lite=True):
 
 | 版本 | 状态 | 备注 |
 |------|------|------|
-| v1.3.0 | 🟢 **当前发布版** | QVeris 能力路由接入：discover→inspect→call / 双端点自动选区 / 429·401 进引擎生命周期 |
-| v1.2.0 | ✅ 历史 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
+| v1.2.0 | 🟢 **当前发布版** | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
 | v1.0.1 | ✅ 历史 | 审计 G1–G13 + ABC 能力增强 + 引擎生命周期 P0–P3 |
 | v1.0.0 | ✅ 历史 | 工具面收敛 + 搜索引擎降级链重写 |
 | 后续 | 🟡 待办 | 见 `references/ROADMAP.md` |
@@ -196,5 +194,4 @@ infoseek/
 
 ---
 
-> v1.3.0 | QVeris 能力路由接入（discover→inspect→call / 双端点自动选区）| 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
 > v1.2.0 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
