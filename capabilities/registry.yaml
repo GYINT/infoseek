@@ -1,0 +1,69 @@
+# Infoseek 外部能力注册表（声明式）
+# ───────────────────────────────────────────────────────────────
+# 设计原则（M0.2.5）：所有外部能力在此声明，代码零改动接入。
+#   - 新增能力：仅在此追加条目（无需改 pipeline / key_manager / lifecycle）
+#   - 生命周期：health_probe=engine_lifecycle 时，错误自动经
+#     engine_lifecycle.classify 分类（429→quota / 401-403→forbidden / …）
+#   - 代偿：degrade_to 声明能力间语义替代链，由 capability_compensator 消费
+#   - 合规：requires_consent=true 的能力必须显式授权才运行；enabled=false 默认 OFF
+#
+# 字段说明：
+#   name          能力名（唯一，作为生命周期 state key）
+#   kind          能力族（structured_data_api / identity_attribution / search_api / llm）
+#   enabled       默认是否启用（false=默认 OFF，需 env 或 consent 开启）
+#   requires_consent  是否需合法用途授权（针对个人的能力必为 true）
+#   auth_env      认证环境变量（无需则留空）
+#   weight        召回/排序权重（0-1）
+#   cost_model    none / credits / quota（影响保留池/预算策略）
+#   cli           命令行可执行名（subprocess 调用，隔离重依赖于主进程）
+#   health_probe  engine_lifecycle（复用既有健康/配额/自愈）
+#   degrade_to    失效时的能力间替代链（末端可放 manual_review 优雅降级）
+#   venv_hint     隔离 venv 依赖提示（可选）
+
+version: 1
+
+capabilities:
+  - name: QVeris
+    kind: structured_data_api
+    enabled: true
+    requires_consent: false
+    auth_env: QVERIS_API_KEY
+    weight: 0.9
+    cost_model: credits
+    health_probe: engine_lifecycle
+    degrade_to: [Exa, Tavily]
+
+  - name: Maigret
+    kind: identity_attribution
+    enabled: false            # 默认 OFF：合规 opt-in
+    requires_consent: true    # 针对个人的 OSINT，必须授权
+    auth_env: ""
+    weight: 0.9
+    cost_model: none
+    cli: maigret
+    health_probe: engine_lifecycle
+    degrade_to: [Sherlock, manual_review]
+    venv_hint: "pip install maigret（隔离 venv 推荐）"
+
+  - name: Sherlock
+    kind: identity_attribution
+    enabled: false            # 默认 OFF：合规 opt-in
+    requires_consent: true
+    auth_env: ""
+    weight: 0.85
+    cost_model: none
+    cli: sherlock
+    health_probe: engine_lifecycle
+    degrade_to: [manual_review]
+    venv_hint: "pip install sherlock-project（隔离 venv 推荐）"
+
+  # 末端优雅降级：无替代能力时，返回"需人工核实"标记而非静默丢数据
+  - name: manual_review
+    kind: graceful_fallback
+    enabled: true
+    requires_consent: false
+    auth_env: ""
+    weight: 0.0
+    cost_model: none
+    health_probe: none
+    degrade_to: []
