@@ -343,12 +343,6 @@ def extract_keywords_detailed(
         return [(w, float(vote_count[w])) for w in ranked], "zerodep"
 
     # 共识集为空（极短文本/单句）：回退到票数最高候选（召回优先、降权）
-    if not vote_count:
-        # 兜底缺陷修复：min_count=2 会滤掉仅出现 1 次的词（单次文本候选池为空）
-        # -> 用 min_count=1 重建候选池，保证极短/单次文本也能产出关键词
-        for n in (2, 3, 4):
-            for w, v in _ngram_freq(text, n, min_count=1).items():
-                vote_count[w] += v
     fallback_terms = _longest_match_suppress(Counter(dict(vote_count)))
     ranked = sorted(fallback_terms, key=lambda w: vote_count[w], reverse=True)[:max_kw]
     return [(w, float(vote_count[w]) * 0.5) for w in ranked], "zerodep"
