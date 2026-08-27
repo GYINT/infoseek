@@ -1,6 +1,6 @@
 # Infoseek 外部依赖清单（External Dependencies）
 
-> 版本：v1.3.0 ｜ 说明：全部第三方依赖均为**可选降级**设计——缺失时自动走标准库兜底路径，不阻断核心流程（零依赖哲学）。`requirements.txt` 为核心 + 文本分析 + 可选 LLM；`requirements-extra.txt` 为浏览器抓取。
+> 版本：v1.2.0 ｜ 说明：全部第三方依赖均为**可选降级**设计——缺失时自动走标准库兜底路径，不阻断核心流程（零依赖哲学）。`requirements.txt` 为核心 + 文本分析 + 可选 LLM；`requirements-extra.txt` 为浏览器抓取。
 
 ## 一、必需依赖（直接 import，缺失即相关功能不可用）
 
