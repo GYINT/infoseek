@@ -1420,3 +1420,100 @@ if __name__ == "__main__":
         with open(args.anchors) as f:
             anchors = json.load(f)
         run_pipeline(anchors, args.output)
+
+
+# ═══════════════════════════════════════════════════════════════
+# M0.3：身份归因阶段（可选，默认 OFF，合规 opt-in）
+# 锚点矩阵"平面 B"：已知用户名 → 平台账号锚点
+# 复用统一能力注册表 + 代偿层：Maigret → Sherlock → manual_review
+# ═══════════════════════════════════════════════════════════════
+
+def _ensure_cap_paths():
+    """确保 core / scripts 在 sys.path（独立运行时兜底）。"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for p in (root, here):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+
+
+def _identity_handlers(consent: bool, max_results: int) -> dict:
+    """构建能力→handler 映射（懒加载客户端，隔离重依赖）。"""
+    def _maigret(u, **kw):
+        from maigret_client import search as m_search
+        return m_search(u, consent=consent, max_sites=500, timeout=180)
+
+    def _sherlock(u, **kw):
+        from sherlock_client import search as s_search
+        return s_search(u, consent=consent, timeout=120)
+
+    def _manual(u, **kw):
+        # 优雅降级末端：返回缺口标记（非真实数据，避免静默误导）
+        return [{"platform": "(需人工核实)", "url": "", "username": u,
+                 "fullname": "", "site_rank": 0, "confidence": 0.0,
+                 "source": "manual_review", "_gap": True}]
+
+    return {"Maigret": _maigret, "Sherlock": _sherlock, "manual_review": _manual}
+
+
+def _audit_identity(msg: str) -> None:
+    """审计落盘（复用 state_dir.audit_log_path）。"""
+    try:
+        _ensure_cap_paths()
+        from core.state_dir import audit_log_path
+        p = audit_log_path()
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} [identity_attribution] {msg}\n")
+    except Exception:
+        pass
+
+
+def search_identity_attribution(username: str, consent: bool = False,
+                                 max_results: int = 10) -> list:
+    """身份归因阶段（锚点矩阵平面 B）：已知用户名 → 平台账号锚点。
+
+    双重闸口（合规优先）：
+      - INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION=1 显式启用
+      - 注册表 Maigret/Sherlock 经 enabled ∩ consent 判定
+    代偿：沿注册表 degrade_to（Maigret → Sherlock → manual_review），
+          每个尝试经 engine_lifecycle 记录健康，失败自动续链。
+    返回锚点条目 [{url,title,snippet,score,source,identity_attribution,confidence}]；
+          缺口（全链耗尽）→ 审计标记，不包装为锚点。
+    """
+    if not os.environ.get("INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION"):
+        log.debug("[身份归因] 未启用（INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION 未设），跳过")
+        return []
+    _ensure_cap_paths()
+    from core.capability_registry import is_effective_enabled
+    if not (is_effective_enabled("Maigret") or is_effective_enabled("Sherlock")):
+        log.debug("[身份归因] Maigret/Sherlock 均不可用（未启用或未授权），跳过")
+        return []
+
+    handlers = _identity_handlers(consent, max_results)
+    from capability_compensator import compensate, audit_trail
+    res = compensate("Maigret", handlers, username, max_results=max_results)
+    _audit_identity(audit_trail(res))
+
+    if res.result is None:
+        return []
+    accounts = res.result if isinstance(res.result, list) else []
+    if res.gap_flag:
+        # 仅缺口标记，不包装为锚点（避免误导）
+        log.warning(f"[身份归因] 能力链耗尽，标记需人工核实: {username}")
+        return []
+
+    anchors = []
+    for acc in accounts[:max_results]:
+        conf = float(acc.get("confidence") or 0)
+        anchors.append({
+            "url": acc.get("url") or "",
+            "title": acc.get("platform") or acc.get("source") or "未知平台",
+            "snippet": f"{acc.get('username') or username} @ {acc.get('platform','')}"
+                       + (f" ({acc.get('fullname')})" if acc.get("fullname") else ""),
+            "score": int(conf * 100),
+            "source": acc.get("source", "Maigret"),
+            "identity_attribution": True,
+            "confidence": conf,
+        })
+    log.info(f"[身份归因] '{username}' → {len(anchors)} 个账号锚点（via {res.used}）")
+    return anchors
