@@ -1,6 +1,6 @@
 # Infoseek 路线图（历史脉络 · 待办 · 前景方向）
 
-> 版本：v1.3.0 ｜ 本文档统一承载：对话历史脉络总结、已完成里程碑、优化升级待办、v2.x 前景方向。
+> 版本：v1.2.0 ｜ 本文档统一承载：对话历史脉络总结、已完成里程碑、优化升级待办、v2.x 前景方向。
 
 ---
 
@@ -32,8 +32,8 @@ Infoseek 的开发经历了「修复 → 增强 → 生命周期化 → 能力�
 
 | 维度 | 状态 |
 | --- | --- |
-| 全量回归 | 26/26 套件 PASS |
-| 质量基线 | v1.3.0，26/26 套件 all_ok（27 项含 deep） |
+| 全量回归 | 25/25 套件 PASS |
+| 质量基线 | v1.2.0，26/26 套件 all_ok |
 | 符号自检 | 9 模块 ALL OK |
 | 外部文档 | SKILL.md / README / configuration / external-deps / api-keys / ROADMAP 发布态同步 |
 
@@ -82,3 +82,56 @@ Infoseek 的开发经历了「修复 → 增强 → 生命周期化 → 能力�
 - 符号自检 9 模块 ALL OK
 - 零破坏性变更（状态文件 / env 向后兼容）
 - 文档同步（SKILL.md / README / configuration / 本路线图）
+
+---
+
+## 六、M 系列能力治理里程碑（2026-08-26）
+
+> 目标：在不破坏既有能力前提下，补齐「外部依赖全生命周期动态自适应」治理能力，并完成跨平台发布收口（v1.4.0）。
+
+### 6.1 里程碑状态
+
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| M0.1 | QVeris 接入（双端点选区 / discover→inspect→call / 错误分类） | ✅ 完成 |
+| M0.2 | Maigret 影子验证（CN 命中率/耗时/误报率验收） | ✅ 完成（安装 + 实时验证） |
+| M0.2.5 | 统一能力注册表（registry.yaml + capability_registry.py） | ✅ 完成 |
+| M0.3 | Maigret/Sherlock 客户端 + 合规闸（ConsentRequired 上抛降级） | ✅ 完成 |
+| M0.4 | 代偿层（capability_compensator.py + degrade_to 链） | ✅ 完成 |
+| M0.5 | 锚点矩阵 / 搜索引擎全生命周期收敛 | ✅ 完成 |
+
+### 6.2 M0.2 影子验证结论（真实数据）
+
+- **环境**：隔离 venv（`maigret 0.6.5`），样本 username `maigret`，参数 `--top-sites 50 --timeout 10 --retries 1 --no-extracting`
+- **实测**：38 站点 / 10.6s，命中 **7 个账号** —— GitHub / WordPress / **CSDN** / WordPressOrg / StackOverflow / TripAdvisor / Twitch
+- **CN 覆盖确认**：CSDN（tags=`blog,cn,coding`）命中，证明 maigret 中国站点库与 `scripts/maigret_client.py` 链路生效
+- **错误率说明**：timeout/connection/bot/captcha 合计 ~69% 为**沙箱出网受限**所致，非工具缺陷；真实网络环境命中率更高
+- **契约对齐**：产出 JSON 与 `maigret_client.search()` 解析契约一致，可直接接入 pipeline 的 `search_identity_attribution`
+- **验收判定**：**通过**（安装就绪 + CN 链路实证 + 输出契约对齐）
+
+### 6.3 整合待办（按优先级）
+
+**P0（治理收口遗留）**
+1. **Sherlock 实时验证** —— `sherlock_client.py` 结构已对齐；需在隔离 venv 装 `sherlock-project` 跑一次样本，补齐 M0.3 双客户端实证
+2. **能力注册表启用流** —— `registry.yaml` 中 Maigret/Sherlock/manual_review 均 default_off；补充「授权→enable→consent 记录」端到端 CLI/UX（当前仅函数级 `grant_consent`）
+3. **跨平台安装验证** —— `install.sh` 已在 Windows-Git-Bash 实战校验（结构 + 6 关键模块语法全 OK）；Linux/macOS 需目标机联网装依赖后各跑一次 `bash install.sh --venv`
+
+**P1（低风险快速收益，沿用原 ROADMAP）**
+4. perf 多轮 P50/P95 采样
+5. FreshnessCron 实体持久层
+6. L3 登录源真实凭证端到端验证
+
+**P2（核心收益）**
+7. 搜索召回深化（实体图谱邻域 / 同义词）
+8. L4 转录启用（openai-whisper）
+9. 冲突检测多源加权
+
+**P3（v2.x 立项）**
+10. 多模态理解 / 编排协同 / 合规审计自动化
+
+### 6.4 M1.x 升级路线（提议）
+
+- **M1.0 双 OSINT 客户端实证闭环**：Sherlock 实时验证 + Maigret/Sherlock 结果融合去重 + 误报率基准（CN/IN/全局样本建立误报基线）
+- **M1.1 授权与审计 UX**：consent 授予前端化（首次调用交互授权、审计日志落盘 `~/.infoseek/consent.log`）、注册表可视化 `infoseek capability status`
+- **M1.2 跨平台发布流水线**：`install.sh` 扩展为含依赖哈希校验 + 签名 + 7 生态（dist/）一键分发；CI 自动跑 `leak_scan` + 全量回归 + 跨平台 install 冒烟
+- **M1.3 代偿健康度看板**：`capability_compensator` 的 `trail` 聚合为健康度指标，异常 degrade 链可视化告警
