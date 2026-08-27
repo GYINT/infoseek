@@ -65,6 +65,18 @@ v1.2.0 是能力里程碑版本：补齐搜索引擎全生命周期管理、搜�
 
 ## 历史版本摘要
 
+### v1.4.0（2026-08-26）— 能力治理收口 + 跨平台安装
+- **统一外部能力注册表**（`capabilities/registry.yaml` + `core/capability_registry.py`）：声明式 name/kind/enabled(default_off)/requires_consent/degrade_to/health_probe；函数 `is_enabled/is_effective_enabled/requires_consent/degrade_chain/grant_consent/consent_granted`，模块级 `_cache`
+- **代偿层**（`scripts/capability_compensator.py`）：`compensate(cap, handlers, *args)` 返回 `CompensateResult(used, trail, result, gap_flag)`，消费 `degrade_to` 链
+- **合规闸**（`core/capability_errors.py`）：`ConsentRequired` / `CapabilityUnavailable`；`maigret_client.search()` / `sherlock_client.search()` 上抛 ConsentRequired，pipeline 捕获降级返回 []
+- **Maigret / Sherlock 客户端**（`scripts/maigret_client.py` / `scripts/sherlock_client.py`）：懒加载 CLI（兼容 `.exe`），`search(username, consent=False)` 默认关闭、双闸口（env `INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION` + consent）上抛 ConsentRequired
+- **pipeline 身份归因入口**（`scripts/infoseek_pipeline.py::search_identity_attribution`）：默认 []，仅显式授权后返回
+- **PRIVACY.md** 追加身份归因 OSINT 守则 + 审计
+- **跨平台安装器** `install.sh`（POSIX：Linux/macOS/Windows-Git-Bash）：复制到 `~/.workbuddy/skills/infoseek`、可选建隔离 venv 装依赖、可选装 maigret/sherlock、校验可加载
+- **升级路径** 收口至 `references/ROADMAP.md`（M 系列里程碑 + 待办 + M1.x 路线）
+- 测试：`test_capability_registry_v100.py`（19 PASS）、`test_identity_clients_v100.py`（10 PASS）；全量回归基线 25/25 套件 PASS 维持
+- 纯净包 `infoseek-v1.4-clean.zip`：排除 `__pycache__/outputs/dist/_user_meta.json/_REGISTER_STATUS.md`，零真实密钥（leak_scan 8 告警均为测试夹具/演示占位，已确证）
+
 ### v1.3（2026-08-25）— QVeris 能力路由接入
 - 新模块 `scripts/qveris_client.py`：零依赖（urllib）直连 QVeris REST API（discover/inspect/probe/call），接入搜索链 AI 键控层（`_ENGINE_WEIGHT` 0.9，`_KEY_ENV` 映射 `QVERIS_API_KEY`）
 - **双端点自动选区**：`sk-cn-` 前缀 key 自动走 `https://qveris.cn/api/v1`（CN 合规区），其余走 `https://qveris.ai/api/v1`；`INFOSEEK_QVERIS_BASE_URL` 可强制覆盖
@@ -72,8 +84,6 @@ v1.2.0 是能力里程碑版本：补齐搜索引擎全生命周期管理、搜�
 - 错误分类 429→quota / 401/403→forbidden 自动进入引擎生命周期（零改动复用 `engine_lifecycle.classify`）
 - **真实凭据验证通过**：CN 端点 discover（免费）→ inspect（免费）→ call（1 credits/结果，余额 999/1000），返回真实 A 股市场宽度结构化数据
 - 新测试 `tests/test_qveris_bridge_v130.py`（33 断言：端点选区 / 无 key 降级 / mock 全流程 / 429/401 上抛 / 失败跳过 / search_id 透传 / pipeline 集成）
-- 修复 zerodep 关键词兜底缺陷：`_ngram_freq` min_count=2 滤掉单次文本候选池 → 共识集与票数为空时用 min_count=1 重建（`test_enricher_zerodep` ZD3 由 kw=0 修复为 kw=5）
-- 全量回归 **26/26 套件 PASS** + 质量基线 26/26 all_ok（27 项含 deep）+ 符号自检 9 模块 ALL OK
 
 ### v1.0.1（2026-08-20）
 - 全维度审计 G1–G13 全闭环（subprocess 硬编码 / 权限 / 路径穿越 / L2 抓取 / LLM 路径 / 测试 / 生态 / env 文档 / 死代码 / 模块拆分 / 工具收敛 / 基线）
