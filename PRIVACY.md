@@ -33,3 +33,42 @@ Infoseek 是端到端内容采集与调研工具。使用本插件时，将处�
 ## 5. 联系我们
 
 - 项目仓库 / 维护者联系方式（发布时补充）。
+
+## 6. 身份归因能力（OSINT）合规守则（M0.4）
+
+> 本节针对 infoseek 可选的「身份归因」能力族（Maigret / Sherlock，经统一能力注册表
+> `capabilities/registry.yaml` 声明）。该能力属针对**个人**的公开数据 OSINT，须遵守以下闸门。
+
+### 6.1 默认关闭 + 双重授权
+
+- **默认 OFF**：`capabilities/registry.yaml` 中 Maigret / Sherlock 的 `enabled: false`，
+  且 `requires_consent: true`。未显式开启前，任何调用静默返回空（不采集）。
+- **显式授权**：必须由调用方经合规闸口 `grant_consent(cap_name)` 授权，并经
+  `INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION=1` 环境变量开启，方才运行。
+- **代码层硬闸**：`maigret_client.search(consent=False)` 在已声明启用但未授权时
+  抛 `ConsentRequired`，由 `search_web` / pipeline 捕获降级（不静默运行）。
+
+### 6.2 合法用途边界
+
+仅允许用于以下场景，**禁止**用于骚扰、人肉搜索、未经授权的私人追踪、规避平台限制：
+
+| 允许 ✅ | 禁止 ❌ |
+|---|---|
+| 自审（核查自身公开足迹） | 骚扰 / 人肉搜索 |
+| 授权尽调（有书面授权） | 未经授权的私人追踪 |
+| 威胁情报 / 安全研究（已知威胁） | 规避平台隐私/登录限制 |
+| 品牌保护 / 商标核查 | 任何非法或不道德目的 |
+
+### 6.3 数据最小化与审计
+
+- **不递归、不抓个人页**：默认 `--no-extracting`，仅做存在性 + 基础 profile（公开字段）。
+- **仅公开数据**：不尝试登录、不抓需授权的私有内容。
+- **审计落盘**：每次身份归因调用（含代偿链 `Maigret → Sherlock → manual_review`）
+  记入 `audit.log`（`core/state_dir.audit_log_path()`），含使用能力与结果标记。
+- **缺口标记**：能力链全耗尽时，返回"需人工核实"标记，**不静默伪造数据**。
+
+### 6.4 数据保留
+
+- 身份归因结果（账号锚点）按既有 `state_dir` 策略存放于本机 `~/.infoseek/`，
+  不上传运营方服务器；用户可随时删除。
+- 仅当 subject 确为**人名/用户名**时触发；主题/内容类调研不进入此路径。
