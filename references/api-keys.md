@@ -1,6 +1,6 @@
 # Infoseek 外部 API Key 清单（API Keys Reference）
 
-> 版本：v1.3.0 ｜ 说明：所有 Key 均为**可选**——不配置时自动降级（LLM 走 mock、搜索层自动跳过限量引擎），核心免费搜索链（DDG/Bing/Wikipedia/Jina）无需任何 Key 即可工作。Key 经 `KeyManager` 归一化管理（加密落盘 + 系统 keyring 后端 + 状态机/熔断/配额），可通过 `keys` CLI 增删查改。
+> 版本：v1.2.0 ｜ 说明：所有 Key 均为**可选**——不配置时自动降级（LLM 走 mock、搜索层自动跳过限量引擎），核心免费搜索链（DDG/Bing/Wikipedia/Jina）无需任何 Key 即可工作。Key 经 `KeyManager` 归一化管理（加密落盘 + 系统 keyring 后端 + 状态机/熔断/配额），可通过 `keys` CLI 增删查改。
 
 ## 一、LLM Provider（核心 `llm_router.py`，用于 LLM 评分/摘要）
 
