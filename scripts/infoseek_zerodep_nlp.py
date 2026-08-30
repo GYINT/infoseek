@@ -117,10 +117,18 @@ def _ngram_freq(text: str, n: int, min_count: int = 2) -> Counter:
 
 
 def _est_zh_ngram(text: str, top: int = 20) -> Set[str]:
-    """估计器 A：多粒度 n 元语法词频（2/3/4 字组合）。"""
+    """估计器 A：多粒度 n 元语法词频（2/3/4 字组合）。
+
+    修复（环境重置回归）：min_count=2 会滤掉单次候选（如空格分隔的短语列表
+    「人工智能 大模型 …」每词只出现 1 次），导致估计器为空 → 关键词全丢。
+    此时回退 min_count=1 重建（召回优先、精度由共识投票兜底）。
+    """
     c = Counter()
     for n in (2, 3, 4):
-        c.update(_ngram_freq(text, n))
+        grams = _ngram_freq(text, n, min_count=2)
+        if not grams:
+            grams = _ngram_freq(text, n, min_count=1)
+        c.update(grams)
     # 过滤内置停用词与单字噪声已由 _ngram_freq 处理
     return set(_longest_match_suppress(c)[:top])
 
