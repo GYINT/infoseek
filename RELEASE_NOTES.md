@@ -63,7 +63,31 @@ v1.2.0 是能力里程碑版本：补齐搜索引擎全生命周期管理、搜�
 
 ---
 
+## v1.4.1（2026-08-30）— P0/P1 能力增强（能力路由中枢）
+
+> 定位：在 v1.4.0 能力治理收口基础上，落地「能力路由中枢」蓝图第一阶段（P0/P1），
+> 从「搜索引擎为中心」升级为「多路数据源按 意图×成本×健康 动态路由」。
+
+### 新增能力
+
+| 能力 | 模块 | 说明 |
+|---|---|---|
+| public-apis 免费目录 | `scripts/public_apis_catalog.py` | README→本地 JSON 索引（1712 条/51 分类/799 无 key），L0 免费优先层 |
+| 账号人因验证 | `scripts/account_trust_scorer.py` | 四维评分→real/bot/suspicious/unknown，纯规则零依赖，consent 闸控 |
+| 三级路由 | `scripts/tiered_router.py` | 意图识别→L0 免费→L1 网关→L2 专用→人工核实 |
+| AgentKey 网关适配 | `ecosystem/adapters/agentkey.py` | MCP 骨架（金融优先/社交默认 OFF），mcp 缺失优雅降级 |
+| 注册表 v2 | `capabilities/registry.yaml` | 新增 kind `free_api`/`gateway_api`，7 能力双源一致 |
+
+### 修复与质量
+
+- ZD3 关键词提取回归修复（min_count 空回退）
+- 新增 17 用例，全量回归 29/29 PASS
+
+---
+
 ## 历史版本摘要
+
+
 
 ### v1.4.0（2026-08-26）— 能力治理收口 + 跨平台安装
 - **统一外部能力注册表**（`capabilities/registry.yaml` + `core/capability_registry.py`）：声明式 name/kind/enabled(default_off)/requires_consent/degrade_to/health_probe；函数 `is_enabled/is_effective_enabled/requires_consent/degrade_chain/grant_consent/consent_granted`，模块级 `_cache`
