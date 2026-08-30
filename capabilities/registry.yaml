@@ -57,6 +57,49 @@ capabilities:
     degrade_to: [manual_review]
     venv_hint: "pip install sherlock-project（隔离 venv 推荐）"
 
+  # P0b 新增：账号人因验证器（L2 真人验证层）
+  # 纯规则启发式（零依赖/零网络/零成本）：区分 真人/机器人/水军/可疑
+  # 输入账号画像字段（年龄/发帖/粉丝/僵尸粉/互动率/行为规律/话题多样性），
+  # 输出 trust_score + verdict；与 Maigret/Sherlock 构成 发现→验证 闭环
+  - name: AccountTrustScorer
+    kind: identity_attribution
+    enabled: false            # 默认 OFF：涉个人数据，合规 opt-in
+    requires_consent: true
+    auth_env: ""
+    weight: 0.8
+    cost_model: none
+    health_probe: none
+    degrade_to: [manual_review]
+    venv_hint: ""
+
+  # P1a 新增：public-apis 免费 API 目录（L0 免费优先层）
+  # 目录索引本地化（scripts/public_apis_catalog.py），1712 条/51 分类/799 条无 key
+  # 供三级路由做 0 成本长尾数据源；失效时退回 manual_review（不静默丢数据）
+  - name: PublicApisCatalog
+    kind: free_api
+    enabled: false            # 默认 OFF：目录索引按需加载（INFOSEEK_ENABLE_PUBLICAPISCATALOG=1）
+    requires_consent: false
+    auth_env: ""
+    weight: 0.5
+    cost_model: none
+    health_probe: none
+    degrade_to: [manual_review]
+    venv_hint: ""
+
+  # P1b 新增：AgentKey 统一 MCP 网关（L1 网关付费层）
+  # 一个主密钥 → ~1800 工具（搜索/社交/金融含 Tushare/加密/电商）
+  # 默认 OFF：付费 credits + 涉社交个人数据，必须显式授权后按子集接入
+  - name: AgentKey
+    kind: gateway_api
+    enabled: false            # 默认 OFF：付费 + 合规，opt-in
+    requires_consent: true
+    auth_env: AGENTKEY_API_KEY
+    weight: 0.9
+    cost_model: credits
+    health_probe: engine_lifecycle
+    degrade_to: [QVeris, PublicApisCatalog, manual_review]
+    venv_hint: "pip install mcp（AgentKey 为 MCP 网关；需 find_tools/execute_tool 封装）"
+
   # 末端优雅降级：无替代能力时，返回"需人工核实"标记而非静默丢数据
   - name: manual_review
     kind: graceful_fallback
