@@ -1,6 +1,6 @@
 ---
 name: infoseek
-version: 1.4.0
+version: 1.4.1
 description: 端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级：静态/渲染/凭证/多媒体）、搜索引擎全生命周期管理（健康/配额/新鲜度自愈）、QVeris 能力路由、统一能力注册表（consent 闸控）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并）、召回增强（别名扩展/多样性合并/自适应门槛）、跨源融合分析，最终输出结构化 Markdown 报告，可选自动归档。适用：行业调研、趋势分析、竞品分析、市场研究、技术研究、内容采集、报告生成、长期知识库建设。不适用：实时新闻监控、学术文献综述、浏览器自动化爬取、即时聊天对话
 license: MIT
 ---
@@ -179,6 +179,10 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 | 引擎生命周期 | `scripts/engine_lifecycle.py` | 健康状态机 / 配额追踪 / 认证粘滞 / 新鲜度自愈（配额重置、冷却恢复、API 漂移检测）+ CLI engine-status/reconcile/probe/reset |
 | QVeris 能力路由 | `scripts/qveris_client.py` | 结构化金融/数据能力：discover→inspect→call 全流程，双端点自动选区（sk-cn-→qveris.cn 合规区），429/401 自动进入引擎生命周期 |
 | 4 级抓取 | `scripts/mcp_tools_search.py` | `extraction_level` 1/2/3/4 路由：静态 / playwright 渲染 / KeyManager 凭证注入（仅内存）/ 多媒体 chunk |
+| public-apis 免费目录 | `scripts/public_apis_catalog.py` | L0 免费优先层：README→本地 JSON 索引（1712 条/51 分类/799 无 key），关键词/分类/认证检索，离线内嵌集兜底 |
+| 三级路由 | `scripts/tiered_router.py` | 意图识别→L0 免费→L1 网关→L2 专用→人工核实；免费优先、credits 预算保护 |
+| 账号人因验证 | `scripts/account_trust_scorer.py` | L2 真人验证：成熟度/粉丝/行为/内容四维评分→real/bot/suspicious/unknown，纯规则零依赖（consent 闸控） |
+| AgentKey 网关适配 | `ecosystem/adapters/agentkey.py` | L1 网关付费层：MCP find_tools→describe_tool→execute_tool 骨架（金融子集优先，社交默认 OFF），mcp 缺失优雅降级 |
 
 ### 4.6 输出导出
 
