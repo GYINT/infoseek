@@ -27,6 +27,7 @@ def _load_adapters() -> Dict[str, Type[EcosystemAdapter]]:
     registry: Dict[str, Type[EcosystemAdapter]] = {}
     adapter_names = [
         'workbuddy', 'ima', 'claude', 'codex', 'dify', 'coze', 'generic_mcp',
+        'agentkey',   # P1b: AgentKey 统一 MCP 网关（L1 网关付费层）
     ]
     for mod_name in adapter_names:
         try:
