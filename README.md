@@ -1,9 +1,9 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v1.2.0 发布版**。
+> 端到端内容智能采集与调研工作流。**v1.4.1 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-1.2.0-blue)](#)
+[![Version](https://img.shields.io/badge/version-1.4.1-blue)](#)
 [![Tests](https://img.shields.io/badge/tests-25%20suites%20PASS-success)](#)
 [![MCP](https://img.shields.io/badge/MCP-15%20tools-blueviolet)](#)
 
@@ -26,7 +26,7 @@ python scripts/infoseek_mcp_server.py
 
 ---
 
-## 🎉 v1.2.0 发布亮点
+## 🎉 v1.4.1 发布亮点
 
 | 能力 | 说明 |
 |------|------|
@@ -113,7 +113,7 @@ async for partial in streaming_research("AI", sources, lite=True):
 
 | 版本 | 状态 | 备注 |
 |------|------|------|
-| v1.2.0 | 🟢 **当前发布版** | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
+| v1.4.1 | 🟢 **当前发布版** | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
 | v1.0.1 | ✅ 历史 | 审计 G1–G13 + ABC 能力增强 + 引擎生命周期 P0–P3 |
 | v1.0.0 | ✅ 历史 | 工具面收敛 + 搜索引擎降级链重写 |
 | 后续 | 🟡 待办 | 见 `references/ROADMAP.md` |
@@ -194,4 +194,4 @@ infoseek/
 
 ---
 
-> v1.2.0 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
+> v1.4.1 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
