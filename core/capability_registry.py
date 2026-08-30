@@ -48,6 +48,22 @@ _DEFAULT_REGISTRY = {
          "cost_model": "none", "cli": "sherlock", "health_probe": "engine_lifecycle",
          "degrade_to": ["manual_review"],
          "venv_hint": "pip install sherlock-project（隔离 venv 推荐）"},
+        # P0b 新增：账号人因验证器（L2 真人验证层，纯规则零依赖）
+        {"name": "AccountTrustScorer", "kind": "identity_attribution", "enabled": False,
+         "requires_consent": True, "auth_env": "", "weight": 0.8,
+         "cost_model": "none", "health_probe": "none",
+         "degrade_to": ["manual_review"], "venv_hint": ""},
+        # P1a 新增：public-apis 免费 API 目录（L0 免费优先层）
+        {"name": "PublicApisCatalog", "kind": "free_api", "enabled": False,
+         "requires_consent": False, "auth_env": "", "weight": 0.5,
+         "cost_model": "none", "health_probe": "none",
+         "degrade_to": ["manual_review"], "venv_hint": ""},
+        # P1b 新增：AgentKey 统一 MCP 网关（L1 网关付费层）
+        {"name": "AgentKey", "kind": "gateway_api", "enabled": False,
+         "requires_consent": True, "auth_env": "AGENTKEY_API_KEY", "weight": 0.9,
+         "cost_model": "credits", "health_probe": "engine_lifecycle",
+         "degrade_to": ["QVeris", "PublicApisCatalog", "manual_review"],
+         "venv_hint": "pip install mcp（AgentKey 为 MCP 网关）"},
         {"name": "manual_review", "kind": "graceful_fallback", "enabled": True,
          "requires_consent": False, "auth_env": "", "weight": 0.0,
          "cost_model": "none", "health_probe": "none", "degrade_to": []},
