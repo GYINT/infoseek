@@ -112,6 +112,7 @@ def main() -> int:
         'note': 'P50/P95 需 rounds≥3；单轮时 metrics 为逐轮原始值',
     }
     out = ROOT / 'dist' / 'perf_baseline_v101.json'
+    out.parent.mkdir(parents=True, exist_ok=True)  # v2.0.0 修复：dist 缺失时 FileNotFoundError
     out.write_text(json.dumps(baseline, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f'\n已写入 {out}')
     return 0
