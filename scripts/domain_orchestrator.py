@@ -18,6 +18,7 @@ CLI 用法:
 """
 
 import os
+import re
 import sys
 import json
 import yaml
@@ -26,6 +27,20 @@ from typing import Optional
 
 WORKSPACE = Path(os.environ.get('OPENCLAW_WORKSPACE', str(Path.home() / 'infoseek')))
 INFOSEEK_ROOT = Path(os.environ.get('INFOSEEK_ROOT', str(Path(__file__).parent.parent)))
+
+
+def _excerpt(text, limit: int = 600) -> str:
+    """正文摘要（P2 内容链中枢字段）：压缩空白/换行 → 取前 limit 字符
+
+    s.text 为抓取正文，长度不定且含脏空白；统一在此归一，
+    模板 / _render_simple / _render_fallback 三处消费同一 text_excerpt。
+    """
+    if not text:
+        return ''
+    norm = re.sub(r'\s+', ' ', str(text)).strip()
+    if len(norm) <= limit:
+        return norm
+    return norm[:limit].rstrip() + '…'
 
 
 class DomainOrchestrator:
@@ -123,6 +138,7 @@ class DomainOrchestrator:
             source, subject,
             with_domain=bool(profile),
             domain_profile=profile,
+            prefer_kb=bool(domain_result.get('prefer_kb')),
         )
 
         # 合并：保留原字段 + 评分结果
@@ -182,6 +198,9 @@ class DomainOrchestrator:
             rs = dict(s)
             if 'final_score' in rs and 'score' not in rs:
                 rs['score'] = rs['final_score']
+            # P2 内容链（2026-09-10）：正文摘要字段——渲染层消费 s.text 的中枢，
+            # 模板 / _render_simple / _render_fallback 统一使用（长度归一 + 脏空白清洗）
+            rs['text_excerpt'] = _excerpt(rs.get('text'))
             rendered_sources.append(rs)
 
         # 6. 渲染模板
@@ -251,6 +270,8 @@ class DomainOrchestrator:
             lines.append(f"- **链接**: {s.get('url', '')}")
             if s.get('snippet'):
                 lines.append(f"\n> {s.get('snippet', '')[:300]}")
+            if s.get('text_excerpt'):
+                lines.append(f"\n> 📄 正文要点：{s['text_excerpt']}")
             lines.append("")
         return "\n".join(lines)
 
