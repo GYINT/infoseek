@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-domain_router.py — Infoseek 领域 Profile 路由器（v1.8.0）
+domain_router.py — Infoseek 领域 Profile 路由器（mod-v1.8.1）
+
+版本维度声明（v1.8.1 治理）：本文件内所有 v1.8.x 标记均为「模块内部版本 mod-v」，仅描述
+本模块自身演进，与 skill 对外版本（scripts/mcp_tools_common.py:SKILL_VERSION）不同维度，
+不可比较大小、不可混用。
 
 从 5 个领域 profile YAML 中根据关键词自动路由：
 - tech-research（技术工艺）
@@ -23,8 +27,8 @@ WORKSPACE = Path(os.environ.get('OPENCLAW_WORKSPACE', str(Path.home() / 'infosee
 DOMAINS_DIR = Path(__file__).parent.parent / 'domains'
 
 
-# 各领域关键词触发词
-DOMAIN_TRIGGERS = {
+# 各领域关键词触发词（内置兜底；唯一真源见 references/keyword.yaml，v1.7.5 外置）
+_BUILTIN_TRIGGERS = {
     'tech-research': {
         'weight': 1.0,
         'keywords': [
@@ -82,6 +86,37 @@ DOMAIN_TRIGGERS = {
 }
 
 
+def _load_domain_triggers() -> dict:
+    """加载领域关键词触发词（唯一真源 references/keyword.yaml，v1.7.5 外置）。
+
+    - 文件缺失 / 解析失败 / 结构为空 → 返回内置 _BUILTIN_TRIGGERS 副本（路由不塌）
+    - env INFOSEEK_KEYWORD_YAML 可覆盖路径
+    """
+    path = os.environ.get('INFOSEEK_KEYWORD_YAML') or str(
+        Path(__file__).parent.parent / 'references' / 'keyword.yaml')
+    try:
+        p = Path(path)
+        if p.exists():
+            data = yaml.safe_load(p.read_text(encoding='utf-8')) or {}
+            doms = data.get('domains') or {}
+            out = {}
+            for k, v in doms.items():
+                if isinstance(v, dict) and v.get('keywords'):
+                    out[k] = {
+                        'weight': v.get('weight', 1.0),
+                        'keywords': list(v['keywords']),
+                    }
+            if out:
+                return out
+    except Exception:
+        pass
+    return {k: {'weight': v['weight'], 'keywords': list(v['keywords'])}
+            for k, v in _BUILTIN_TRIGGERS.items()}
+
+
+DOMAIN_TRIGGERS = _load_domain_triggers()
+
+
 def detect_domain(subject: str) -> dict:
     """根据主题文本自动选择最匹配的领域 profile。
 
@@ -113,6 +148,12 @@ def detect_domain(subject: str) -> dict:
 
     # 按得分降序排序
     candidates.sort(key=lambda x: -x['score'])
+    # v1.8.1 多域交集判定（A）：多域得分>0 且 top2 差距 < 阈值 → 判交集
+    _gap = _intersect_gap()
+    _positive = [c for c in candidates if c['score'] > 0]
+    _is_intersect = bool(len(_positive) >= 2
+                         and (_positive[0]['score'] - _positive[1]['score']) < _gap)
+    _intersect_domains = [c['domain'] for c in _positive]
 
     best = candidates[0] if candidates else None
     if not best or best['score'] == 0:
@@ -123,6 +164,9 @@ def detect_domain(subject: str) -> dict:
             'candidates': candidates,
             'profile_path': None,
             'is_default': True,
+            'intersect_domains': [],
+            'is_intersect': False,
+            'prefer_kb': False,
         }
 
     profile_path = DOMAINS_DIR / f"{best['domain']}.yaml"
@@ -132,6 +176,9 @@ def detect_domain(subject: str) -> dict:
         'candidates': candidates,
         'profile_path': str(profile_path) if profile_path.exists() else None,
         'is_default': False,
+        'intersect_domains': _intersect_domains,
+        'is_intersect': _is_intersect,
+        'prefer_kb': _is_intersect,
     }
 
 
@@ -165,45 +212,156 @@ def load_profile(domain_name: str) -> dict:
     return profile
 
 
-def apply_profile_to_score(source: dict, profile: dict) -> dict:
-    """根据 profile 微调评分权重。
+def apply_profile_to_score(source: dict, profile: dict, prefer_kb: bool = False) -> dict:
+    """根据 profile 微调评分权重（v1.8.1：泛化信任源解析 + prefer_kb 加分分段）。
 
     参数:
-        source: 来源 dict（含 url、platform、text 等）
-        profile: 领域 profile dict
+        source: 来源 dict（含 url、platform、text 等；可带 _kb_domain / _kb_hit_count）
+        profile: 领域 profile dict（含 raw 文本）
+        prefer_kb: 是否处于多域交集场景（由 detect_domain 产出）。开启后对带 KB
+                   域标记的 source 额外加分（分段边界见 _KB_INTERSECT_BONUS / _KB_MULTI_BONUS）
 
     返回:
-        更新后的 source（含 adjusted_score / domain_applied 字段）
+        更新后的 source（含 domain_applied / domain_bonus 字段）
     """
     if not profile:
         return source
 
-    # 信任源加权（v1.8.0 简化版：检查 URL 是否在 profile 信任源白名单）
-    url_lower = source.get('url', '').lower()
+    # v1.8.1 单源委托：信任源加权（消除三份漂移）
+    bonus = trust_source_bonus(source, profile)
 
-    # 解析 raw 文本中的"信任源白名单"
-    trust_keywords = []
-    for line in profile.get('raw', '').split('\n'):
-        if '宝钢' in line or 'Wind' in line or '中金' in line or '国务院' in line or 'Reddit' in line:
-            # 提取粗略关键词（简化处理）
-            for kw in re.findall(r'[\u4e00-\u9fff]{2,4}|[A-Z][a-zA-Z]+', line):
-                if len(kw) >= 2 and kw not in ['权重', 'Tier', '类型', '来源', 'Tier 1']:
-                    trust_keywords.append(kw)
-
-    # 命中加权
-    bonus = 0
-    for kw in set(trust_keywords):
-        if kw.lower() in url_lower or kw in source.get('platform', ''):
-            bonus += 5
+    # v1.8.1 prefer_kb 加分分段（交集场景 KB 可信度更高；单源委托）
+    if prefer_kb:
+        bonus += kb_intersect_bonus(source, profile)
 
     source['domain_applied'] = profile.get('name', '')
-    source['domain_bonus'] = min(bonus, 20)  # 上限 20 分
+    source['domain_bonus'] = min(bonus, domain_bonus_cap())  # v1.8.3 单源 cap
     return source
 
 
-# ═══════════════════════════════════════════════════════════════
-# CLI 入口
-# ═══════════════════════════════════════════════════════════════
+# ── v1.8.1 多域交集 / KB 优先 辅助常量与函数 ──
+def _int_env(name: str, default: int) -> int:
+    """整型 env 读取（非法值回落默认；v1.7.5 配置化）。"""
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+_DOMAIN_BONUS_CAP = _int_env('INFOSEEK_DOMAIN_BONUS_CAP', 20)      # 信任源加权总分上限（模块加载期快照）
+_KB_INTERSECT_BONUS = _int_env('INFOSEEK_KB_INTERSECT_BONUS', 8)   # 交集场景：单 KB +8
+_KB_MULTI_BONUS = _int_env('INFOSEEK_KB_MULTI_BONUS', 4)           # 交集场景：多 KB 额外 +4（合计 +12）
+
+
+def domain_bonus_cap() -> int:
+    """领域加权总分上限 —— 唯一 cap 真源（v1.8.3 · §8.4 去硬编码）。
+
+    历史分叉：本模块用 `_DOMAIN_BONUS_CAP`（env 可配），而
+    `core/anchor_score_v2.compute_domain_bonus_v2` 与
+    `scripts/anchor_adapter._compute_domain_bonus` 各自硬编码 `min(bonus, 20)`
+    → 调 `INFOSEEK_DOMAIN_BONUS_CAP` 后两处不跟随，声明化配置半失效。
+    现三处统一委托本函数（**每次动态读 env**，故运行期改 env / 测试 monkeypatch 均生效；
+    `_DOMAIN_BONUS_CAP` 常量保留仅为向后兼容引用，不再作为判分依据）。
+    """
+    return _int_env('INFOSEEK_DOMAIN_BONUS_CAP', 20)
+_TRUST_HINTS = tuple(
+    h.strip() for h in os.environ.get('INFOSEEK_TRUST_HINTS', '来源,Tier,白名单').split(',')
+    if h.strip()
+)
+
+
+def trust_source_bonus(source: dict, profile: dict) -> int:
+    """信任源加权（单源定义，v1.7.2）。
+
+    从 profile raw 的「来源/Tier/白名单」行提取信任源实体词，
+    命中 url 计 +5 / platform 计 +3，上限 domain_bonus_cap()（v1.8.3 动态 env）。
+    收敛 anchor_adapter._compute_domain_bonus 与
+    anchor_score_v2.compute_domain_bonus_v2 的重复实现（原 +4/+3 全行提取）。
+    """
+    if not profile:
+        return 0
+    url_lower = (source.get('url') or '').lower()
+    platform = source.get('platform') or ''
+    bonus = 0
+    for kw in set(_extract_trust_sources(profile.get('raw', ''))):
+        if kw.lower() in url_lower:
+            bonus += 5
+        if kw in platform:
+            bonus += 3
+    return min(bonus, domain_bonus_cap())  # v1.8.3 单源 cap
+
+
+def parse_domain_params(profile: dict) -> dict:
+    """从领域 profile（Markdown raw）解析「领域路由参数」块（v1.7.5 声明化）。
+
+    识别行：
+        intersect_boost: 8
+        kb_priority: true
+    解析失败/缺省 → 对应值为 None（消费方回落默认常量）。
+    """
+    raw = profile.get('raw', '') if isinstance(profile, dict) else ''
+    out = {'intersect_boost': None, 'kb_priority': None}
+    m = re.search(r'intersect_boost:\s*(\d+)', raw)
+    if m:
+        out['intersect_boost'] = int(m.group(1))
+    m2 = re.search(r'kb_priority:\s*(true|false)', raw, re.IGNORECASE)
+    if m2:
+        out['kb_priority'] = m2.group(1).lower() == 'true'
+    return out
+
+
+def kb_intersect_bonus(source: dict, profile: dict = None) -> int:
+    """prefer_kb 交集场景的 KB 源加分（单 KB +8 / 多 KB 额外 +4，**合计 +12**）。
+
+    v1.8.3 文档勘误：原首行「多 KB +4」易被误读为多 KB 总分 4（低于单 KB），
+    实际语义 = _KB_INTERSECT_BONUS(8) + _KB_MULTI_BONUS(4) = 12；
+    `trusted_kb.kb_merge` 注释「单 KB +8 / 多 KB +12」为正确口径，现两处对齐。
+
+    单源定义：供 anchor_adapter / anchor_score_v2 / infoseek_core_v2 /
+    trusted_kb 等消费方复用，避免多份漂移。
+    识别标记：source['_kb_domain']（kb_enrich/kb_merge 注入）
+             + source['_kb_hit_count']（多 KB 命中数，>=2 触发额外加成）。
+    v1.7.5 声明化：profile 提供 intersect_boost 时覆盖默认基准（多 KB 额外仍用常量）。
+    """
+    kb_domain = source.get('_kb_domain') or source.get('kb_domain')
+    if not kb_domain:
+        return 0
+    try:
+        hits = int(source.get('_kb_hit_count', 1) or 1)
+    except (TypeError, ValueError):
+        hits = 1
+    base = _KB_INTERSECT_BONUS
+    if profile:
+        p = parse_domain_params(profile).get('intersect_boost')
+        if p is not None:
+            base = p
+    bonus = base
+    if hits >= 2:
+        bonus += _KB_MULTI_BONUS
+    return bonus
+
+
+def _intersect_gap() -> float:
+    """多域交集判定阈值（INFOSEEK_DOMAIN_INTERSECT_GAP，默认 2）。"""
+    try:
+        return max(0.0, float(os.environ.get('INFOSEEK_DOMAIN_INTERSECT_GAP', '2')))
+    except (TypeError, ValueError):
+        return 2.0
+
+
+def _extract_trust_sources(raw: str) -> list:
+    """从 profile raw 抽取信任源实体词（替代 v1.8.0 硬编码清单）。
+
+    识别含「来源/Tier/白名单」提示的表格行，抽取中英文专有名词。
+    """
+    kws = []
+    for line in (raw or '').split('\n'):
+        if not any(h in line for h in _TRUST_HINTS):
+            continue
+        for kw in re.findall(r'[\u4e00-\u9fff]{2,6}|[A-Z][a-zA-Z]{2,}', line):
+            if len(kw) >= 2 and kw not in ('权重', 'Tier', '类型', '来源', 'Tier 1', '适用场景'):
+                kws.append(kw)
+    return kws
 
 if __name__ == '__main__':
     import sys
@@ -225,3 +383,4 @@ if __name__ == '__main__':
     print("所有候选:")
     for cand in result['candidates'][:3]:
         print(f"  - {cand['domain']:20s} 得分={cand['score']:.0f} 命中={cand['hit_count']}")
+
