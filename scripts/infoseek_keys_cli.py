@@ -340,6 +340,90 @@ def cmd_engine_probe(args) -> int:
     return 0
 
 
+def cmd_capability_status(args) -> int:
+    """能力注册表状态（T8/B2 审计 UX）：声明启用 / env 闸 / consent 授权 / 综合生效 / 降级链。"""
+    try:
+        from core import capability_registry as cr
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from core import capability_registry as cr
+    cr.reload()
+    caps = cr.list_capabilities()
+    if not caps:
+        print("（注册表为空）")
+        return 0
+    hdr = f"{'能力':<20}{'kind':<26}{'声明':<6}{'env闸':<8}{'consent':<9}{'生效':<6}降级链"
+    print(hdr)
+    print("-" * 100)
+    for c in sorted(caps, key=lambda x: (x.get("kind", ""), x.get("name", ""))):
+        name = c.get("name", "")
+        kind = c.get("kind", "")
+        declared = "ON" if c.get("enabled") else "off"
+        env_v = os.environ.get(c.get("env_var") or f"INFOSEEK_ENABLE_{name.upper()}", "")
+        env_s = "set" if env_v else "-"
+        cons = "✓" if cr.consent_granted(name) else ("✗" if c.get("requires_consent") else "-")
+        eff = "ON" if cr.is_effective_enabled(name) else "-"
+        chain = "→".join(cr.degrade_chain(name))
+        print(f"{name:<20}{kind:<26}{declared:<6}{env_s:<8}{cons:<9}{eff:<6}{chain}")
+    print("-" * 100)
+    cl = cr.consent_log_path()
+    print(f"consent.log: {cl or '(不可用)'}")
+    return 0
+
+
+def cmd_audit_report(args) -> int:
+    """归因/取证审计报表（T8/B2）：聚合 audit.log，含取证降级统计。"""
+    try:
+        from core.state_dir import audit_log_path
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from core.state_dir import audit_log_path
+    from collections import Counter
+    p = audit_log_path()
+    if not os.path.exists(p):
+        print(f"（审计日志不存在: {p}）")
+        return 0
+    lines = open(p, encoding="utf-8").read().splitlines()
+    ident = [l for l in lines if "[identity_attribution]" in l]
+    foren = [l for l in lines if "[account_forensics]" in l]
+    other = [l for l in lines if l and "[identity_attribution]" not in l
+             and "[account_forensics]" not in l]
+    print("=" * 72)
+    print("Infoseek 合规审计报表（T8）")
+    print("=" * 72)
+    print(f"审计总行数: {len(lines)} | 身份归因: {len(ident)} | 账号取证: {len(foren)} | 其他: {len(other)}")
+    deg = Counter()
+    for l in ident:
+        if "skipped-no-consent" in l:
+            deg["skipped_no_consent"] += 1
+        elif "skipped-disabled" in l:
+            deg["skipped_disabled"] += 1
+        elif "manual_review" in l and "gap" in l:
+            deg["manual_review_gap"] += 1
+        elif "exhausted" in l:
+            deg["capability_exhausted"] += 1
+        else:
+            deg["ok_or_other"] += 1
+    fdeg = Counter()
+    for l in foren:
+        if "insufficient" in l or "降级" in l:
+            fdeg["降级/不足"] += 1
+        else:
+            fdeg["深度取证完成"] += 1
+    print("\n[身份归因] 降级分布:")
+    for k, v in deg.most_common():
+        print(f"  {k:<24}{v}")
+    print("\n[账号取证] 通道统计:")
+    for k, v in (fdeg.most_common() or [("（无记录）", 0)]):
+        print(f"  {k:<24}{v}")
+    if args.json:
+        import json
+        print(json.dumps({"total": len(lines), "identity": len(ident), "forensics": len(foren),
+                          "identity_degradation": dict(deg), "forensics_stats": dict(fdeg)},
+                         ensure_ascii=False, indent=1))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description='infoseek keys —— KeyManager 生命周期管理 CLI')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -423,6 +507,13 @@ def main() -> int:
 
     p_eng_prb = sub.add_parser('engine-probe', help='存活探测（对账全部引擎并报告恢复项）')
     p_eng_prb.set_defaults(func=cmd_engine_probe)
+
+    p_cap = sub.add_parser('capability-status', help='能力注册表状态（T8：声明/env/consent/生效/降级链）')
+    p_cap.set_defaults(func=cmd_capability_status)
+
+    p_aud = sub.add_parser('audit-report', help='合规审计报表（T8：身份归因 + 账号取证降级统计）')
+    p_aud.add_argument('--json', action='store_true', help='JSON 输出')
+    p_aud.set_defaults(func=cmd_audit_report)
 
     args = ap.parse_args()
     # CLI 持久化仓库语义：启动时自动加载加密仓库（若存在），
