@@ -41,6 +41,21 @@ def _safe_load_claim_store():
         return None
 
 
+def _truncate_subject(title: str, limit: int = 40) -> str:
+    """主题词截断（P3 词边界修复：避免 title[:20] 在中文标题中被拦腰截断）
+
+    优先按标点/空格切到句首完整段；无分隔符时按 limit 截断。
+    """
+    t = (title or '').strip()
+    if len(t) <= limit:
+        return t
+    for sep in ('，', '。', '；', '、', ',', '.', ';', ' '):
+        head = t.split(sep, 1)[0].strip()
+        if 0 < len(head) < limit:
+            return head
+    return t[:limit]
+
+
 def _safe_load_profile():
     """v2.4.3 PATCH (P2): 用 EntityProfile 单例"""
     try:
