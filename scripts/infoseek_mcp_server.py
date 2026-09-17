@@ -71,6 +71,8 @@ from mcp_tools_analysis import (
 )
 from mcp_tools_keys import tool_manage_keys, tool_key_usage
 from mcp_tools_qcm import tool_qcm_query  # V8.4: QCM 反向工具
+from mcp_tools_identity import tool_identity_attribution  # v1.5.0: 身份归因工具（T2/G2）
+from mcp_tools_forensics import tool_account_forensics  # v1.6.0 融入: 账号取证工具（B1，发现→取证双子）
 from mcp_tools_async import (
     _handle_async_wrapper, tool_score_contradiction,
     _handle_async_research_wrapper, _stream_research_wrapper,
@@ -339,6 +341,40 @@ TOOLS = [
             "required": ["query"]
         }
     },
+    {
+        "name": "identity_attribution",
+        "description": "身份归因（v1.5.0 新增）：已知用户名 → 跨平台账号锚点 + 人因验证（Maigret→Sherlock→AccountTrustScorer 链）。合规：需 INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION=1 且 consent=true 显式授权；未满足任一 → blocked 显式报错（不静默返回空）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "username": {"type": "string", "description": "目标用户名（必填）"},
+                "consent": {"type": "boolean", "default": False,
+                            "description": "用户授权（涉个人 OSINT 合规闸，须显式 True）"},
+                "max_results": {"type": "integer", "default": 10, "minimum": 1, "maximum": 50}
+            },
+            "required": ["username"]
+        }
+    },
+    {
+        "name": "account_forensics",
+        "description": "账号深度取证（v1.6.0 融入新增）：显式投喂账号数据集 → 四层取证报告（L1统计红旗 + L2图结构协调集群 + 时序同步组 + L3 ML，含盲区边界声明）。输入 dataset={meta:[{id,followers,following,posts,er}], likes?, growth?, edges?} 或文件路径；与 identity_attribution 构成「发现→取证」双子工具。合规：需 INFOSEEK_ENABLE_FAKE_DETECT=1 且 consent=true；未满足任一 → blocked 显式报错。充分性不足（缺时序/ER/图谱）→ degraded insufficient_signals（缺数据≠水军，建议降级 AccountTrustScorer）。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dataset": {
+                    "type": ["object", "string"],
+                    "description": "账号数据集：{meta:[{id,followers,following,posts,er,group_label?}], likes:{id:[每日点赞]}, growth:{id:[每日涨粉]}, edges:[[a,b]]} 或 CSV/JSON 文件路径（经 data_adapter 自动接入）"
+                },
+                "target_accounts": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "可选：只返回这些账号的 verdict（默认全部）"
+                },
+                "consent": {"type": "boolean", "default": False,
+                            "description": "用户授权（涉个人行为画像合规闸，须显式 True）"}
+            },
+            "required": ["dataset", "consent"]
+        }
+    },
 ]
 
 # ═══════════════════════════════════════════════════════════════
@@ -355,6 +391,8 @@ _CANONICAL_TOOL_NAMES = {
     'score_contradiction_async', 'research_v3', 'research_stream',
     'manage_keys', 'key_usage',  # v1.0.1 PATCH: Key 管理工具
     'qcm_query',  # V8.4: QCM 反向工具（跨 skill 协同）
+    'identity_attribution',  # v1.5.0: 身份归因（T2/G2）
+    'account_forensics',  # v1.6.0 融入: 账号取证（B1，发现→取证双子）
 }
 
 _DEPRECATED_MIGRATION = {
@@ -506,6 +544,12 @@ def handle_tools_call(req_id: int, params: Dict) -> Dict:
             result = tool_key_usage(args)
         elif tool_name == "qcm_query":
             result = tool_qcm_query(args)
+        elif tool_name == "identity_attribution":
+            result = tool_identity_attribution(args)
+        elif tool_name == "account_forensics":
+            result = tool_account_forensics(args)
+        elif tool_name == "account_forensics":
+            result = tool_account_forensics(args)
         else:
             return {
                 "jsonrpc": "2.0",
