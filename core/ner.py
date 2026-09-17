@@ -34,29 +34,60 @@ except ImportError:
 
 
 def _normalize(text: str) -> str:
-    """文本归一化（统一小写 + 去空格）"""
-    return re.sub(r'\s+', '', text.lower())
+    """文本归一化（统一小写 + 压缩空白为单空格，保留分词痕迹）
+
+    P3 词边界（2026-09-10）：保留单空格 —— 原有 re.sub(r'\\s+','',...) 全去空格
+    会把 \"OpenAI GPT-5\" 压成 \"openaigpt-5\"，致词边界前瞻失败漏提实体的回归
+    （'openai' 后紧跟 'g' 字母）。保留空格后 \"openai gpt-5\" 边界天然成立。
+    """
+    return re.sub(r'\s+', ' ', text.lower()).strip()
+
+
+# P3 词边界（2026-09-10）：拉丁字母/数字词加 \b 语义边界，
+# 消除 'meta' 命中 'metadata'/'metaverse'、'pe' 命中 'openai' 类子串误报；
+# 中文等非拉丁词不做边界收紧（保留子串语义——中文术语包含关系应命中，
+# 如「失效」命中「失效模式」；而 'Meta' 别名 'meta' 命中 'Metadata' 属误报需拦截）。
+_LATIN_EDGE_RE = re.compile(r'[A-Za-z0-9]')
+
+
+def _boundary_pattern(kw: str):
+    """构造词边界正则（None = 无边界约束的裸词）"""
+    if not kw:
+        return None
+    pat = re.escape(kw)
+    if _LATIN_EDGE_RE.match(kw[0]):
+        pat = r'(?<![A-Za-z0-9_])' + pat
+    if _LATIN_EDGE_RE.match(kw[-1]):
+        pat += r'(?![A-Za-z0-9_])'
+    return re.compile(pat)
 
 
 def _match_entity(text_norm: str, entity: dict) -> Optional[Dict]:
-    """单条实体匹配（返回 span 范围）"""
+    """单条实体匹配（返回 span 范围 · P3 词边界版）
+
+    拉丁字母/数字词强制词边界（前后不得邻接字母数字/下划线），
+    中文词保持子串匹配；均可能命中多处的取首个位置（与旧 find 语义一致）。
+    """
     name_norm = _normalize(entity['name'])
-    if name_norm in text_norm:
-        idx = text_norm.find(name_norm)
-        return {
-            'entity_type': entity.get('category', 'UNKNOWN'),
-            'entity_name': entity['name'],
-            'span': (idx, idx + len(name_norm)),
-            'match_method': 'name',
-        }
+    if name_norm:
+        m = _boundary_pattern(name_norm).search(text_norm)
+        if m:
+            idx = m.start()
+            return {
+                'entity_type': entity.get('category', 'UNKNOWN'),
+                'entity_name': entity['name'],
+                'span': (idx, idx + len(name_norm)),
+                'match_method': 'name',
+            }
 
     # 别名匹配
     for alias in entity.get('aliases', []):
         alias_norm = _normalize(alias)
         if len(alias_norm) < 2:
             continue
-        if alias_norm in text_norm:
-            idx = text_norm.find(alias_norm)
+        m = _boundary_pattern(alias_norm).search(text_norm)
+        if m:
+            idx = m.start()
             return {
                 'entity_type': entity.get('category', 'UNKNOWN'),
                 'entity_name': entity['name'],
@@ -132,7 +163,7 @@ def extract_entities(text: str, entity_types: Optional[List[str]] = None) -> Lis
                     alias_norm = _normalize(alias)
                     if len(alias_norm) < 2:
                         continue
-                    if alias_norm in text_norm:
+                    if _boundary_pattern(alias_norm).search(text_norm):
                         matched_alias = alias
                         match_priority = priority
                         break
