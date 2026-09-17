@@ -111,35 +111,37 @@ def generate_markdown_report(pipeline_result: dict) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 def generate_feedback(details: list) -> list:
-    """从失败结果生成治理反馈建议"""
-    feedbacks = []
-    
-    for r in details:
-        status = r.get("status")
-        if status in ("dead_link", "failed", "needs_tier2"):
-            anchor = r.get("anchor", {})
-            steps = r.get("steps", [])
-            fail_reason = ""
-            for s in steps:
-                if s.get("status") == "fail":
-                    fail_reason = s.get("reason", "")
-                    break
-                if s.get("step") == "tier2_needed":
-                    fail_reason = s.get("reason", "")
-            
-            feedback = {
-                "anchor_name": anchor.get("name", "?"),
-                "anchor_platform": anchor.get("platform", "?"),
-                "anchor_entry": anchor.get("entry", "?"),
-                "original_score": anchor.get("score", 0),
-                "failure_type": status,
-                "failure_reason": fail_reason,
-                "suggested_penalty": -10 if status == "needs_tier2" else -20,
-                "suggested_new_score": max(0, (anchor.get("score", 0) or 0) - (10 if status == "needs_tier2" else 20))
-            }
-            feedbacks.append(feedback)
-    
-    return feedbacks
+    """治理反馈生成（v1.7.6 G2-1 单源收敛）。
+
+    唯一真源 = infoseek_pipeline.generate_feedback；本函数委托之，
+    消除历史口径漂移（failed 此前 pipeline=−10 而本模块=−20）。
+    导入失败 → 内置同口径回退（不阻断报告 CLI）。
+    """
+    try:
+        _here = os.path.dirname(os.path.abspath(__file__))
+        if _here not in sys.path:
+            sys.path.insert(0, _here)
+        from infoseek_pipeline import generate_feedback as _gf
+        return _gf(details)
+    except Exception:
+        feedbacks = []
+        for r in details:
+            status = r.get("status")
+            if status in ("dead_link", "failed", "needs_tier2"):
+                anchor = r.get("anchor", {})
+                penalty = -20 if status == "dead_link" else -10
+                feedbacks.append({
+                    "feedback_type": "failure",
+                    "anchor_name": anchor.get("name", "?"),
+                    "anchor_platform": anchor.get("platform", "?"),
+                    "anchor_entry": anchor.get("entry", "?"),
+                    "original_score": anchor.get("score", 0),
+                    "failure_type": status,
+                    "failure_reason": (r.get("steps", [{}])[-1].get("reason", "")) if r.get("steps") else "",
+                    "suggested_penalty": penalty,
+                    "suggested_new_score": max(0, (anchor.get("score", 0) or 0) + penalty),
+                })
+        return feedbacks
 
 
 # ═══════════════════════════════════════════════════════════════
