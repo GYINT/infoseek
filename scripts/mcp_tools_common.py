@@ -32,7 +32,19 @@ ARCHIVES_DIR = get_archives_dir()
 AUTH_TOKEN = os.environ.get('INFOSEEK_AUTH_TOKEN')
 PROTOCOL_VERSION = "2024-11-05"  # MCP 协议版本
 SERVER_NAME = "infoseek-search"
-SERVER_VERSION = "1.2.0"  # v1.0.0: 发布版本（内部开发版本从 0.0.x 起记录）
+# ══ 版本单源（v1.8.1 治理）═══════════════════════════════════════════
+# SKILL_VERSION = 全仓唯一对外版本真源（single source of truth）。
+# 消费点：SERVER_VERSION（本文件）→ infoseek_mcp_server / infoseek_archive_server
+#         → core/__init__.__version__ → SKILL.md / manifest.yaml / CHANGELOG.md
+#         → RELEASE_NOTES.md
+# 另有三个不同维度的版本，禁止与 SKILL_VERSION 比较大小或混用：
+#   · mod-v   模块内部版本（domain_router mod-v1.8.1 / anchor_score_v2 mod-v2.0.2）
+#   · algo-v  算法与结果体版本（infoseek_core_v2 返回体 'version': '1.2.0'）
+#   · proto-v 协议版本（PROTOCOL_VERSION = MCP 协议；v3.0.0 = 流式 yield 协议）
+# 一致性由 tests/test_version_single_source.py 守护。
+SKILL_VERSION = "2.0.0"
+
+SERVER_VERSION = SKILL_VERSION  # MCP serverInfo.version（对外协议应答，随真源）
 
 # ── v1.6.2 新增：审计日志 + 工具调用统计 ──
 SERVER_START_TIME = time.time()  # 启动时间
