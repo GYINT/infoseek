@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-anchor_adapter.py — v1 Anchor_Score 实现（v2.0.2 标记 DEPRECATED）
+anchor_adapter.py — v1 Anchor_Score 实现（mod-v2.0.2 标记 DEPRECATED）
+
+版本维度声明（v1.8.1 治理）：本文件内 v2.0.2 为「模块内部版本 mod-v」，v1.7.x 为
+「变更溯源标记」，均非 skill 对外版本（见 mcp_tools_common.SKILL_VERSION），不可比较大小。
 
 v2.0.2 状态：
 - 本文件保留为 v1 实现（向后兼容）
@@ -24,14 +27,19 @@ import os
 import re
 import sys
 import warnings
+import functools
 from pathlib import Path
 
 WORKSPACE = Path(os.environ.get('OPENCLAW_WORKSPACE', str(Path.home())))
 # v1.0.0 状态层中立：归档目录解析统一走 state_dir（env INFOSEEK_ARCHIVE → ~/infoseek-archives）
 CORE_DIR = Path(__file__).parent.parent / 'core'
-if str(CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(CORE_DIR))
+SCRIPTS_DIR = Path(__file__).parent
+for _p in (str(CORE_DIR), str(SCRIPTS_DIR)):   # 幂等：模块加载期一次
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 from state_dir import get_archives_dir
+# GA5 分词单源化（v1.8.4）：唯一分词真源；_tokenize_subject 退化为薄封装委托
+from text_tokenizer import tokenize_text
 
 
 def infos_to_seek(anchor: dict) -> Optional[dict]:
@@ -81,314 +89,6 @@ def infos_to_seek(anchor: dict) -> Optional[dict]:
     # 兜底
     return {"platform": "web", "type": "unknown", "quantity": "single",
             "tech": "需确认", "entry": entry, "entry_type": "URL"}
-
-
-# ═══════════════════════════════════════════════════════════════
-# v1.2 新增: 四轴加权评分 + 双层复活机制
-# ═══════════════════════════════════════════════════════════════
-
-# 权重配置
-WEIGHTS = {"interaction": 0.20, "topic_match": 0.30, "credibility": 0.40, "activity": 0.10}
-
-# Ⅰ级阈值（满分档）
-TIER1_THRESHOLD = {
-    "interaction": 100,
-    "topic_match": 100,
-    "credibility": 90,  # 来源可信度Ⅰ级从90起（因最高1级含90/95/100三档）
-    "activity": 100,
-}
-
-
-def compute_anchor_score(
-    interaction: int = 0,
-    topic_match: int = 0,
-    credibility: int = 0,
-    activity: int = 0,
-) -> dict:
-    """
-    四轴加权评分 + 双层复活机制 (v1.2)
-
-    参数: 各维度原始评分 (0-100)
-    返回: {
-        raw_score: float,          # 原始加权分
-        after_whitelist: float,     # 白名单复活后
-        after_top3: float,         # TOP 1~3 复活后
-        classification: str,       # 🟢核心/🟡潜力/❌噪声
-        dimensions: dict,          # 四维原始值
-        whitelist_triggered: bool,  # 白名单是否触发
-        top3_triggered: bool,       # TOP复活是否触发
-        peak_gate_blocked: bool,    # 峰值门控是否拦截
-        peak_dimension: int,        # 最高维分值
-    }
-    """
-    dims = {
-        "interaction": interaction,
-        "topic_match": topic_match,
-        "credibility": credibility,
-        "activity": activity,
-    }
-
-    # 1. 原始加权分
-    raw = (
-        interaction * WEIGHTS["interaction"]
-        + topic_match * WEIGHTS["topic_match"]
-        + credibility * WEIGHTS["credibility"]
-        + activity * WEIGHTS["activity"]
-    )
-    score = raw
-
-    # 2. 第一层: 白名单复活
-    whitelist_triggered = False
-    peak_dim = max(dims.values())
-
-    # 判断任一维度达Ⅰ级
-    has_tier1 = False
-    tier1_dim = None
-    for key, val in dims.items():
-        if val >= TIER1_THRESHOLD.get(key, 100):
-            has_tier1 = True
-            tier1_dim = key
-            break
-
-    if has_tier1:
-        avg = sum(dims.values()) / 4.0
-        # 检查是否有两维(除触发维外) ≥ avg
-        other_dims = {k: v for k, v in dims.items() if k != tier1_dim}
-        if sum(1 for v in other_dims.values() if v >= avg) >= 2:
-            whitelist_triggered = True
-            if score < 70:
-                score = 70
-
-    # 3. 第二层: TOP 1~3 复活（此处仅计算单锚点是否具备复活资格）
-    #    实际 TOP 排序需外部处理；此函数返回资格标记
-    top3_triggered = False
-    peak_gate_blocked = False
-
-    if 40 <= score < 70 and credibility >= 40:
-        if peak_dim > 65:
-            top3_triggered = True  # 有资格参与TOP排序
-            # 注意：实际是否复活取决于TOP排名，此处标记资格
-        else:
-            peak_gate_blocked = True
-
-    # 4. 分类
-    final_score = score
-    if final_score >= 70:
-        classification = "🟢核心"
-    elif final_score >= 40:
-        classification = "🟡潜力"
-    else:
-        classification = "❌噪声"
-
-    return {
-        "raw_score": round(raw, 1),
-        "after_whitelist": round(score, 1),
-        "after_top3": round(final_score, 1),
-        "classification": classification,
-        "dimensions": dims,
-        "whitelist_triggered": whitelist_triggered,
-        "top3_triggered": top3_triggered,
-        "peak_gate_blocked": peak_gate_blocked,
-        "peak_dimension": peak_dim,
-    }
-
-
-def apply_resurrection_batch(anchors: list) -> list:
-    """
-    批量执行双层复活（含 TOP 1~3 排序）。
-
-    输入: [{interaction, topic_match, credibility, activity, ...}, ...]
-    输出: 每个锚点附加复活结果字段
-    """
-    # 第一轮: 计算原始分 + 白名单复活
-    for a in anchors:
-        result = compute_anchor_score(
-            interaction=a.get("interaction", 0),
-            topic_match=a.get("topic_match", 0),
-            credibility=a.get("credibility", 0),
-            activity=a.get("activity", 0),
-        )
-        a["_score_result"] = result
-        a["score"] = result["after_whitelist"]  # 先应用白名单
-
-    # 第二轮: TOP 1~3 复活（只在潜力区中选）
-    candidates = [
-        a for a in anchors
-        if 40 <= a["_score_result"]["after_whitelist"] < 70
-        and a.get("credibility", 0) >= 40
-        and a["_score_result"]["peak_dimension"] > 65  # 峰值门控
-        and a["_score_result"]["top3_triggered"]  # 确认有资格
-    ]
-    candidates.sort(key=lambda a: a["_score_result"]["after_whitelist"], reverse=True)
-
-    for i, a in enumerate(candidates[:3]):
-        a["score"] = 70  # 复活至 70
-        a["_score_result"]["after_top3"] = 70
-        a["_score_result"]["top3_triggered"] = True
-        a["_score_result"]["classification"] = "🟢核心"
-        a["_score_result"]["peak_gate_blocked"] = False
-
-    # 未被TOP复活的潜力锚点，保持白名单后分数
-    for a in anchors:
-        if a["_score_result"]["classification"] == "🟡潜力":
-            a["_score_result"]["after_top3"] = a["_score_result"]["after_whitelist"]
-
-    return anchors
-
-
-# ═══════════════════════════════════════════════════════════════
-# v1.5.0 新增: 五维评分 + 时间衰减（向后兼容，v1.4.0 默认行为不变）
-# ═══════════════════════════════════════════════════════════════
-
-# v1.5.0 五维权重（活跃度移出总分，改为独立时间衰减）
-WEIGHTS_V15 = {
-    "interaction": 0.20,
-    "topic_match": 0.30,
-    "credibility": 0.40,
-    "llm_readability": 0.10,  # 🆕 LLM 上下文可读性
-}
-
-# LLM 上下文可读性四级阈值
-TIER1_THRESHOLD_V15 = {
-    "interaction": 100,
-    "topic_match": 100,
-    "credibility": 90,
-    "llm_readability": 100,
-}
-
-# 时间衰减系数
-TIME_DECAY = {
-    "fresh": 1.0,        # < 30 天
-    "recent": 0.9,       # 30-90 天
-    "aging": 0.7,        # 90-180 天
-    "old": 0.5,          # 180-365 天
-    "ancient": 0.3,      # > 365 天
-}
-
-
-def compute_llm_readability(
-    structure_score: int = 50,
-    noise_score: int = 50,
-    metadata_score: int = 50,
-    length_score: int = 50,
-) -> int:
-    """
-    LLM 上下文可读性维度计算 (v1.5.0)
-
-    参数: 4 个子维度（0-100）
-    返回: 加权总分 (0-100)
-    """
-    weights = {"structure": 0.30, "noise": 0.30, "metadata": 0.20, "length": 0.20}
-    total = (
-        structure_score * weights["structure"]
-        + noise_score * weights["noise"]
-        + metadata_score * weights["metadata"]
-        + length_score * weights["length"]
-    )
-    return int(round(total))
-
-
-def get_time_decay_factor(days_since_published: int) -> float:
-    """
-    时间衰减因子 (v1.5.0)
-
-    输入: 自发布以来的天数
-    返回: 衰减系数
-    """
-    if days_since_published < 30:
-        return TIME_DECAY["fresh"]
-    elif days_since_published < 90:
-        return TIME_DECAY["recent"]
-    elif days_since_published < 180:
-        return TIME_DECAY["aging"]
-    elif days_since_published < 365:
-        return TIME_DECAY["old"]
-    else:
-        return TIME_DECAY["ancient"]
-
-
-def compute_anchor_score_v15(
-    interaction: int = 0,
-    topic_match: int = 0,
-    credibility: int = 0,
-    llm_readability: int = 0,
-    days_since_published: int = 0,
-) -> dict:
-    """
-    v1.5.0 五维评分 + 时间衰减
-
-    与 v1.4.0 的核心差异:
-      - 活跃度从总分维度移出（避免与可信度重复加权）
-      - 新增 LLM 上下文可读性维度（10%）
-      - 时间衰减独立计算（乘在总分上）
-
-    参数: 4 维原始评分 (0-100) + 发布天数
-    返回: {
-        raw_score: float,            # 五维加权原始分
-        after_decay: float,          # 时间衰减后
-        after_whitelist: float,      # 白名单复活后
-        classification: str,         # 🟢核心/🟡潜力/❌噪声
-        dimensions: dict,            # 5 维原始值
-        decay_factor: float,         # 时间衰减系数
-        whitelist_triggered: bool,
-        version: "v1.5.0",
-    }
-    """
-    dims = {
-        "interaction": interaction,
-        "topic_match": topic_match,
-        "credibility": credibility,
-        "llm_readability": llm_readability,
-    }
-
-    # 1. 五维原始加权分
-    raw = sum(dims[k] * WEIGHTS_V15[k] for k in dims)
-
-    # 2. 时间衰减
-    decay = get_time_decay_factor(days_since_published)
-    after_decay = raw * decay
-
-    score = after_decay
-
-    # 3. 白名单复活（与 v1.4.0 一致）
-    whitelist_triggered = False
-    peak_dim = max(dims.values())
-
-    has_tier1 = False
-    tier1_dim = None
-    for key, val in dims.items():
-        if val >= TIER1_THRESHOLD_V15.get(key, 100):
-            has_tier1 = True
-            tier1_dim = key
-            break
-
-    if has_tier1:
-        avg = sum(dims.values()) / 4.0
-        other_dims = {k: v for k, v in dims.items() if k != tier1_dim}
-        if sum(1 for v in other_dims.values() if v >= avg) >= 2:
-            whitelist_triggered = True
-            if score < 70:
-                score = 70
-
-    # 4. 分类
-    if score >= 70:
-        classification = "🟢核心"
-    elif score >= 40:
-        classification = "🟡潜力"
-    else:
-        classification = "❌噪声"
-
-    return {
-        "raw_score": round(raw, 1),
-        "decay_factor": decay,
-        "after_decay": round(after_decay, 1),
-        "after_whitelist": round(score, 1),
-        "classification": classification,
-        "dimensions": dims,
-        "whitelist_triggered": whitelist_triggered,
-        "peak_dimension": peak_dim,
-        "version": "v1.5.0",
-    }
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -456,25 +156,37 @@ def compute_semantic_similarity(text: str, subject: str, method: str = "jaccard"
         return _string_containment_similarity(text, subject)
 
 
-def _string_containment_similarity(text: str, subject: str) -> int:
-    """字符串包含相似度（v1.7.1 baseline，summa 不可用或中文场景的降级）
+def _tokenize_subject(subject: str) -> set:
+    """subject 主体词提取（v1.7.8 P1#4 词级命中率口径 / v1.8.4 GA5 单源化委托）
 
-    返回: 0-100（基于 subject 关键词在 text 中出现的比例）
+    **实现已收敛至唯一真源 `text_tokenizer.tokenize_text()`**（GA5 闭合）——本函数退化为
+    薄封装，仅为向后兼容既有调用点（`_string_containment_similarity`）与测试断言而保留名字。
+
+    历史：v1.7.8 与 `infoseek_pipeline._tokenize_query` 各自独立实现同一套「jieba 优先 →
+    缺失回退 findall 中英数分段」逻辑；v1.8.2 对齐回退算法但两份代码仍并存（审计 P1-1
+    「同算法」声明曾被实测证伪：6 样本 3 分叉）；v1.8.4 抽公共 `tokenize_text` 彻底单源化，
+    口径漂移风险归零。
+
+    与 query 侧的唯一差异（有意设计，非漂移）：本函数**无中文前置门控**（服务通用词级命中率，
+    需处理任意语言 subject）；`_tokenize_query` 传 `require_chinese=True`（服务
+    `_filter_relevant` 的中文多字词硬门槛）。
+    """
+    return tokenize_text(subject)
+
+
+def _string_containment_similarity(text: str, subject: str) -> int:
+    """词级命中率（v1.7.8 P1#4：命中主体词数 / 主体词总数 × 100）
+
+    替代 v1.7.1 字符片段口径（中文逐字）——中文改多字词级（_tokenize_subject，
+    jieba 优先 → 缺失回退 2-gram），与 _filter_relevant 硬门槛同口径。
+    接入 max(jaccard, containment×0.8) 融合（pipeline / core_v2 调用方不变）。
+
+    返回: 0-100
     """
     if not text or not subject:
         return 0
 
-    # 提取 subject 的关键词（按空格切分 + 中文逐字）
-    subject_words = set()
-
-    # 英文/数字词（按空格切分）
-    for word in re.findall(r'[a-zA-Z0-9]{2,}', subject):
-        subject_words.add(word.lower())
-
-    # 中文字符（每个汉字作为关键词）
-    for char in re.findall(r'[\u4e00-\u9fff]', subject):
-        subject_words.add(char)
-
+    subject_words = _tokenize_subject(subject)
     if not subject_words:
         return 0
 
@@ -563,7 +275,8 @@ def _jaccard_similarity(text: str, subject: str) -> int:
         return _string_containment_similarity(text, subject)
 
 
-def _extract_keywords_three_run(text: str, max_keywords: int = 20) -> set:
+@functools.lru_cache(maxsize=2048)
+def _extract_keywords_cached(text: str, max_keywords: int = 20) -> frozenset:
     """三跑提取关键词集合（v1.7.4 新增，独立于 summarize_adapter）
 
     summa + jieba + regex fallback，取关键词数量最多者获胜。
@@ -623,11 +336,23 @@ def _extract_keywords_three_run(text: str, max_keywords: int = 20) -> set:
             pass
 
     if not candidates:
-        return set()
+        return frozenset()
 
     # 取关键词数量最多的获胜
     chosen = max(candidates, key=lambda x: len(x[1]))
-    return chosen[1]
+    return frozenset(chosen[1])
+
+
+def _extract_keywords_three_run(text: str, max_keywords: int = 20) -> set:
+    """三跑提取关键词集合（对外接口，v1.7.4 新增 / v1.8.2 P1 加 LRU 缓存）
+
+    底层走 _extract_keywords_cached（LRU 缓存，返回 frozenset），本函数 copy
+    为可变 set 返回 → 调用方可安全 mutate 而不污染缓存。签名与返回类型同
+    缓存前完全一致（_jaccard_similarity / test_v174_jaccard 等调用方零改动）。
+
+    返回: set of 关键词字符串（小写）
+    """
+    return set(_extract_keywords_cached(text, max_keywords))
 
 
 def _regex_extract_keywords_en(text: str, top_n: int = 20) -> set:
@@ -671,133 +396,13 @@ def _tfidf_similarity(text: str, subject: str) -> int:
     return _jaccard_similarity(text, subject)
 
 
-def calculate_score(
-    source: dict,
-    subject: str = "",
-    with_llm_readability: bool = False,
-    days_since_published: int = 0,
-    with_cross_platform: bool = False,
-    platforms: int = 1,
-    with_semantic: bool = False,
-    semantic_text: str = None,
-    with_domain: bool = False,
-    domain_profile: dict = None,
-) -> dict:
-    """
-    统一评分入口 (v1.5.0/v1.6.0/v1.7.0/v1.8.1)
-
-    v1.5.0 默认：四维评分 + 可选 LLM 维度
-    v1.6.0 扩展：可选第 6 维（跨平台分布度）
-    v1.7.0 扩展：可选第 8 维（语义相似度）
-    v1.8.1 扩展：可选 domain_profile（领域路由权重微调）
-      - with_domain: 是否启用 v1.8.1 领域加权
-      - domain_profile: dict, 含 raw YAML 文本（用于信任源加权），如 None 则自动调用 domain_router.detect_domain(subject)
-    v1.7.0 扩展：可选第 8 维（语义相似度，基于 summa 关键词）
+def _compute_domain_bonus(source: dict, profile: dict, prefer_kb: bool = False) -> int:
+    """计算领域 profile 的信任源加权（v1.8.1；v1.7.2 加 prefer_kb 分段）
 
     参数:
-        source: {interaction, topic_match, credibility, llm_readability?, ...}
-        subject: 调研主题
-        with_llm_readability: 是否启用 v1.5.0 五维
-        days_since_published: 自发布以来的天数
-        with_cross_platform: 是否启用 v1.6.0 第 6 维
-        platforms: 同一主题在不同平台/来源的出现数
-        with_semantic: 是否启用 v1.7.0 第 8 维
-        semantic_text: 用于提取关键词的文本（启用语义相似度时必填）
-
-    返回:
-        v1.4.0 格式（默认）或 v1.5.0 格式（启用 LLM）或 v1.6.0 格式（启用 cross_platform）或 v1.7.0 格式（启用 semantic）
-    """
-    if not with_llm_readability:
-        # 向后兼容 v1.4.0
-        return compute_anchor_score(
-            interaction=source.get("interaction", 0),
-            topic_match=source.get("topic_match", 0),
-            credibility=source.get("credibility", 0),
-            activity=source.get("activity", 0),
-        )
-
-    # v1.5.0 五维
-    llm_read = source.get("llm_readability")
-    if llm_read is None:
-        llm_read = compute_llm_readability(
-            structure_score=source.get("structure_score", 50),
-            noise_score=source.get("noise_score", 50),
-            metadata_score=source.get("metadata_score", 50),
-            length_score=source.get("length_score", 50),
-        )
-
-    base_result = compute_anchor_score_v15(
-        interaction=source.get("interaction", 0),
-        topic_match=source.get("topic_match", 0),
-        credibility=source.get("credibility", 0),
-        llm_readability=llm_read,
-        days_since_published=days_since_published,
-    )
-
-    # v1.6.0 第 6 维（可选）
-    if with_cross_platform:
-        cp_score = compute_cross_platform_score(platforms)
-        base_result["cross_platform_score"] = cp_score
-        base_result["cross_platform_platforms"] = platforms
-        base_result["version"] = "v1.6.0"
-        recomputed = (
-            base_result["after_whitelist"] * 0.95 +
-            cp_score * 0.05
-        )
-        base_result["after_whitelist"] = round(recomputed, 1)
-        if recomputed >= 70:
-            base_result["classification"] = "🟢核心"
-        elif recomputed >= 40:
-            base_result["classification"] = "🟡潜力"
-        else:
-            base_result["classification"] = "❌噪声"
-
-    # v1.7.0 第 8 维（可选）
-    if with_semantic:
-        sem_text = semantic_text or source.get("text", "")
-        sem_score = compute_semantic_similarity(sem_text, subject)
-        base_result["semantic_similarity"] = sem_score
-        base_result["version"] = "v1.7.0"
-        # 第 8 维占 5%（同第 6 维权重）
-        # 五维（含第 6 维）= 95%，第 8 维 = 5%
-        recomputed = base_result["after_whitelist"] * 0.95 + sem_score * 0.05
-        base_result["after_whitelist"] = round(recomputed, 1)
-        if recomputed >= 70:
-            base_result["classification"] = "🟢核心"
-        elif recomputed >= 40:
-            base_result["classification"] = "🟡潜力"
-        else:
-            base_result["classification"] = "❌噪声"
-
-    # v1.8.1 领域加权（可选）
-    if with_domain:
-        if domain_profile is None:
-            # 自动调用 domain_router
-            try:
-                from domain_router import detect_domain
-                routing = detect_domain(subject)
-                domain_profile = routing.get('profile_path') and {'name': routing['domain'], 'raw': open(routing['profile_path']).read()}
-            except (ImportError, Exception):
-                domain_profile = None
-
-        if domain_profile:
-            bonus = _compute_domain_bonus(source, domain_profile)
-            base_result["domain_profile"] = domain_profile.get('name', '')
-            base_result["domain_bonus"] = bonus
-            base_result["version"] = "v1.8.1"
-            # 领域加权 5%（叠加在第 8 维之后）
-            recomputed = base_result["after_whitelist"] * 0.95 + min(100, base_result["after_whitelist"] + bonus) * 0.05
-            base_result["after_whitelist"] = round(recomputed, 1)
-
-    return base_result
-
-
-def _compute_domain_bonus(source: dict, profile: dict) -> int:
-    """计算领域 profile 的信任源加权（v1.8.1）
-
-    参数:
-        source: 源 dict（含 url/platform）
+        source: 源 dict（含 url/platform，可带 _kb_domain/_kb_hit_count）
         profile: 领域 profile dict（含 raw YAML 文本）
+        prefer_kb: 多域交集场景（detect_domain 产出），对带 KB 域标记的源加分
 
     返回:
         0-20 分的加分
@@ -805,64 +410,16 @@ def _compute_domain_bonus(source: dict, profile: dict) -> int:
     if not profile:
         return 0
 
-    raw = profile.get('raw', '')
-    url_lower = source.get('url', '').lower()
-    platform = source.get('platform', '').lower()
-
-    # 从 profile raw 文本提取信任源关键词（中文 2-4 字 + 英文专有名词）
-    trust_keywords = set()
-    for line in raw.split('\n'):
-        # 中文 2-4 字关键词
-        for kw in re.findall(r'[\u4e00-\u9fff]{2,4}', line):
-            if kw not in ['权重', 'Tier', '类型', '来源', 'Tier 1', '适用场景']:
-                trust_keywords.add(kw)
-        # 英文专有名词（首字母大写）
-        for kw in re.findall(r'\b[A-Z][a-zA-Z]{2,}', line):
-            trust_keywords.add(kw)
-
-    bonus = 0
-    for kw in trust_keywords:
-        if kw.lower() in url_lower:
-            bonus += 4
-        if kw in platform:
-            bonus += 3
-
-    return min(bonus, 20)
-
-
-# ═══════════════════════════════════════════════════════════════
-# v1.6.0 新增: 第 6 维（跨平台分布度）+ 跨主题关联分析
-# ═══════════════════════════════════════════════════════════════
-
-# 跨平台分布度等级
-CROSS_PLATFORM_TIERS = {
-    "single": 10,        # 单一来源/平台
-    "narrow": 40,        # 2-3 个平台
-    "moderate": 70,      # 4-6 个平台
-    "broad": 90,         # 7-10 个平台
-    "ubiquitous": 100,   # >10 个平台
-}
-
-
-def compute_cross_platform_score(platforms: int) -> int:
-    """
-    跨平台分布度评分 (v1.6.0 第 6 维)
-
-    参数: 同一主题在不同平台/来源的出现数
-    返回: 0-100 分
-    """
-    if platforms <= 0:
-        return 0
-    elif platforms == 1:
-        return CROSS_PLATFORM_TIERS["single"]
-    elif platforms <= 3:
-        return CROSS_PLATFORM_TIERS["narrow"]
-    elif platforms <= 6:
-        return CROSS_PLATFORM_TIERS["moderate"]
-    elif platforms <= 10:
-        return CROSS_PLATFORM_TIERS["broad"]
-    else:
-        return CROSS_PLATFORM_TIERS["ubiquitous"]
+    # v1.7.2 单源委托（消除三份漂移）：信任源加权 + prefer_kb 分段
+    try:
+        from domain_router import trust_source_bonus, kb_intersect_bonus, domain_bonus_cap
+    except ImportError:
+        return 0  # 单源不可用 → 不加分（不再重复实现）
+    bonus = trust_source_bonus(source, profile)
+    if prefer_kb:
+        bonus += kb_intersect_bonus(source, profile)
+    # v1.8.3 §8.4：cap 委托 domain_router.domain_bonus_cap()（与 anchor_score_v2 同源）
+    return min(bonus, domain_bonus_cap())
 
 
 def _extract_concepts(text: str, top_k: int = 20) -> set:
@@ -916,6 +473,7 @@ def calculate_score(
     semantic_text: str = None,
     with_domain: bool = False,
     domain_profile: dict = None,
+    prefer_kb: bool = None,
 ) -> dict:
     """v1 calculate_score() — v2.0.2 起标记 DEPRECATED
 
@@ -938,6 +496,7 @@ def calculate_score(
             days_since_published=days_since_published,
             with_domain=with_domain,
             domain_profile=domain_profile,
+            prefer_kb=bool(prefer_kb),
         )
     except ImportError:
         # fallback：返回基础评分（不修改 source）
