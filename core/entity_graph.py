@@ -19,6 +19,27 @@ from typing import List, Dict, Optional
 CORE_DIR = Path(__file__).parent
 sys.path.insert(0, str(CORE_DIR))
 
+# v2.5.0 G3: 跨 research 图谱累积（P2-1 召回深化）
+# 每次 research 构建后 set_global_graph 注册，后续 query expansion 复用邻居
+_GLOBAL_GRAPH: Optional['EntityGraph'] = None
+
+
+def set_global_graph(graph: 'EntityGraph') -> None:
+    """注册当前会话图谱（跨 research 累积，供召回扩展复用）"""
+    global _GLOBAL_GRAPH
+    _GLOBAL_GRAPH = graph
+
+
+def get_global_graph() -> Optional['EntityGraph']:
+    """获取会话图谱（无 → None，调用方自行回退）"""
+    return _GLOBAL_GRAPH
+
+
+def reset_global_graph() -> None:
+    """清空会话图谱（测试隔离用）"""
+    global _GLOBAL_GRAPH
+    _GLOBAL_GRAPH = None
+
 
 class EntityGraph:
     """v2.3.0 实体关系图谱"""
@@ -241,6 +262,8 @@ async def build_from_sources_async(sources: List[Dict]) -> dict:
         'entity_a': pair[0], 'entity_b': pair[1],
         'co_occurrence': e['count'], 'weight': e['weight'],
     } for pair, e in [(x['source'], x) for x in top]]
+
+    set_global_graph(g)  # v2.5.0 G3: 注册全局图谱，供后续 query expansion 复用
 
     return {
         'nodes': len(g.nodes),
