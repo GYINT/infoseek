@@ -1,9 +1,9 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v1.4.1 发布版**。
+> 端到端内容智能采集与调研工作流。**v1.5.0 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-1.4.1-blue)](#)
+[![Version](https://img.shields.io/badge/version-1.5.0-blue)](#)
 [![Tests](https://img.shields.io/badge/tests-25%20suites%20PASS-success)](#)
 [![MCP](https://img.shields.io/badge/MCP-15%20tools-blueviolet)](#)
 
@@ -26,7 +26,7 @@ python scripts/infoseek_mcp_server.py
 
 ---
 
-## 🎉 v1.4.1 发布亮点
+## 🎉 v1.5.0 发布亮点
 
 | 能力 | 说明 |
 |------|------|
@@ -93,6 +93,83 @@ async for partial in streaming_research("AI", sources, lite=True):
 
 ---
 
+## 预留接口（可选扩展 · 默认关闭）
+
+> 原则：**默认零风险、扩展按需开启**。以下能力**默认不启用**；接口与开关语义已定义，
+> 供你按需选择。如需启用，按表中说明配置，或提出需求由我们按你的策略实现
+> （启用不改变其他默认行为）。
+
+### 1. 搜索层引擎请求缓存（预留 · 默认关闭）
+
+**默认行为（现状）**：**不缓存**。每次搜索都实时请求搜索引擎端点
+（DuckDuckGo / Bing-RSS / Jina / Wikipedia / 智谱 / CN-Web …），保证结果时效性。
+
+> 注：**目标网页内容抓取**（`tool_fetch_content` 链路）**已接入** `http_cache.py`
+> （LRU + TTL + 容量上限，默认存 `~/.infoseek/http_cache/`），与本节无关。
+
+| 项 | 值 |
+|---|---|
+| 预留开关 | `INFOSEEK_SEARCH_HTTP_CACHE`（`0` = 关闭·默认 / `1` = 开启）|
+| 预留 TTL | `INFOSEEK_SEARCH_HTTP_CACHE_TTL`（秒，建议 60–300）|
+| 生效范围 | 搜索层 `infoseek_pipeline._http_get()` 的引擎端点请求 |
+
+**取舍（请选择）**：缓存引擎请求可**省流量、抗限流、加速降级**，但会**直接返回陈旧搜索结果**。
+各引擎时效特性不同（DuckDuckGo / Bing 变化快，Wikipedia 较稳定），建议启用时按引擎分级 TTL，
+或仅在「失败重试 / 降级」场景缓存。
+
+### 2. 知识库（KB）接线（预留 · 默认未接线）
+
+**默认行为（现状）**：infoseek 为**闭环采集器** —— 调研产物落本地（archive / dedup），
+**不从外部知识库取信源，也不回写知识库**。
+
+> 注：`trusted_kb.py`（可信资源库）与 `core/entity_profile.py`（实体画像）为 skill
+> **内部**可信库，与知识库平台无关。
+
+| 预留方向（请选择其一） | 含义 | 规划接口 |
+|---|---|---|
+| A. KB → infoseek | 知识库作为信源召回，与 web 结果混排 | `INFOSEEK_KB_ID` + 检索 API |
+| B. infoseek → KB | 调研报告自动归档进知识库 | `INFOSEEK_KB_ID` + 新建 / 写入文档 API |
+| C. 双向 | A + B | 同上 |
+
+**启用前需确定**：知识库 ID（`kb_id`）、写入格式（Markdown / 文件）、去重与更新策略。
+
+**如何选择**：提供 kb_id 与方向（A / B / C），我们按契约接线；未选择时保持默认
+（不接线、零行为变化）。
+
+---
+
+## 搜索层并发与聚合窗口（G5 · 默认开启）
+
+> 搜索层默认**全引擎并发 + 聚合窗口**：并发上限 12、窗口 8s（仅对超慢引擎生效）。
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `INFOSEEK_SEARCH_MAX_WORKERS` | `12` | 进程级常驻池并发上限（懒创建，不浪费线程）|
+| `INFOSEEK_SEARCH_WINDOW_MS` | `8000` | 聚合窗口；到期即聚合返回，未达引擎结果丢弃；`0` = 关闭（回退原语义）|
+| `INFOSEEK_SEARCH_EARLY_FACTOR` | `1.5` | 提前收敛倍数：已完成引擎去重结果 ≥ max_results×factor 即提前返回；`0` = 关闭 |
+| `INFOSEEK_SEARCH_SHARED_BUDGET` | `1` | 层间共享总预算（AI 层与默认层共享一个窗口，总延迟有上界）；`0` = 各层各耗窗口 |
+| `INFOSEEK_SEARCH_TOTAL_BUDGET_MS` | `= WINDOW_MS` | 层间共享总预算时长（覆盖默认窗口值）|
+| `INFOSEEK_SEARCH_OVERRUN_LIMIT` | `2` | 连续超窗次数阈值；达阈值 → 引擎临时降权（暂停拉起）；`0` = 关闭降级 |
+| `INFOSEEK_SEARCH_OVERRUN_MUTE_S` | `60` | 降权冷却秒；到期自动复活（计数清零重新积累）；`0` = 静默到进程结束 |
+
+**行为**：
+- **常驻池**：线程池进程级复用，单次搜索退出不再 `shutdown(wait=True)` 阻塞 → 层耗时不再等于最慢引擎。
+- **聚合窗口**：`wait(timeout=window)` 到期即返回；**正常场景（引擎均 < 窗口）零影响** —— 全部完成即立即返回，
+  仅截断病态慢引擎（实测：3s 慢引擎 + 快引擎，窗口 400ms → **0.8s** 返回完整快引擎结果）。
+- **提前收敛（v1.6.1）**：轮询 `FIRST_COMPLETED`，已完成引擎结果 ≥ max_results×1.5 即提前返回（不等满窗）——
+  高产出批次（如 5 引擎×10 条）最快 0.05s 返回，且不丢已完成结果。
+- **超窗引擎（v1.6.1）**：结果丢弃，健康记录仍由线程内正常完成（**不误杀引擎**）；连续超窗达阈值
+  → 临时降权（`_filter_muted` 不再拉起该引擎），冷却后自动复活 —— 慢引擎自我淘汰，不拖累整链。
+- **保留兜底入预算（v1.6.1）**：主并行不足 `min_expected` 时兜底，保留引擎**并行提交并纳入剩余预算**
+  （原 0.8s×N 串行兜底移除）；预算耗尽（剩余 ≤0.05s）则跳过兜底，延迟上界优先。
+- **层间共享总预算（v1.6.1）**：AI 层与默认层共享一个 deadline（总预算 = WINDOW 或 TOTAL_BUDGET_MS）——
+  AI 层未耗完则默认层继承剩余预算（结果不丢）；AI 层耗完则默认层快速失败，**总延迟不再两层叠加**；
+  层间 0.8s 限速在剩余预算不足时自动跳过（预算即节流）。
+- **一键回退**：`INFOSEEK_SEARCH_WINDOW_MS=0` 回到旧行为。`INFOSEEK_SEARCH_SHARED_BUDGET=0`
+  `INFOSEEK_SEARCH_EARLY_FACTOR=0` `INFOSEEK_SEARCH_OVERRUN_LIMIT=0` 分别关闭 P1/P2 各子能力。
+
+---
+
 ## 文档导航
 
 | 文档 | 用途 |
@@ -102,7 +179,8 @@ async for partial in streaming_research("AI", sources, lite=True):
 | [requirements.txt](requirements.txt) | 运行时依赖清单 |
 | [references/external-deps.md](references/external-deps.md) | 外部依赖清单 + 作用 + 降级路径 |
 | [references/api-keys.md](references/api-keys.md) | 外部 API Key 清单 + 效益 + 获取 |
-| [references/ROADMAP.md](references/ROADMAP.md) | 历史脉络 · 待办 · 前景方向 |
+| [references/ROADMAP.md](references/ROADMAP.md) | 当前基线 · 待办 · 前景方向（纯净版） |
+| references/ROADMAP_archive_20260917.md | v1.0.0→v2.0.0 历史实施记录归档 |
 | [tests/](tests/) | 测试套件（25 标准 + deep，run_tests.py 聚合） |
 
 > ℹ️ **冷启动说明**：运行时状态（`claims.json`、`entity_aliases.json`、`pending_entities.json`、`anchor_db.json`、`engine_state.json` 等）首跑为空占位，运行后随调研逐步积累。这些文件**不写入技能源码目录**，落在运行时数据目录（默认 `~/.infoseek/`，可用 `INFOSEEK_DATA_DIR` 覆盖），技能更新不丢数据。详见 `core/state_dir.py`。
@@ -113,7 +191,8 @@ async for partial in streaming_research("AI", sources, lite=True):
 
 | 版本 | 状态 | 备注 |
 |------|------|------|
-| v1.4.1 | 🟢 **当前发布版** | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
+| v1.5.0 | 🟢 **当前发布版** | 身份归因能力链 P0：发现→验证闭环 + MCP 工具 + 主链集成（合规双闸） |
+| v1.4.1 | ✅ 历史 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
 | v1.0.1 | ✅ 历史 | 审计 G1–G13 + ABC 能力增强 + 引擎生命周期 P0–P3 |
 | v1.0.0 | ✅ 历史 | 工具面收敛 + 搜索引擎降级链重写 |
 | 后续 | 🟡 待办 | 见 `references/ROADMAP.md` |
@@ -194,4 +273,4 @@ infoseek/
 
 ---
 
-> v1.4.1 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
+> v1.5.0 | 身份归因能力链 P0（发现→验证→MCP→主链）| 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
