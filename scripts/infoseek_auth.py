@@ -171,7 +171,7 @@ if __name__ == "__main__":
     assert am.check_scope(p, "tools/call") and am.check_tool(p, "research_v3")
     assert am.check_scope(None, "tools/call") is False
     c = SecretCipher("master-key")
-    e = c.encrypt("sk-deepseek-secret-xyz-12345")
-    assert e != "sk-deepseek-secret-xyz-12345"
-    assert c.decrypt(e) == "sk-deepseek-secret-xyz-12345"
+    e = c.encrypt("DEMO-SECRET-xyz-12345")
+    assert e != "DEMO-SECRET-xyz-12345"
+    assert c.decrypt(e) == "DEMO-SECRET-xyz-12345"
     print("infoseek_auth self-check OK")
