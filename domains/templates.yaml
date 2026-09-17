@@ -18,6 +18,9 @@ templates:
       {% if s.snippet %}
       - 摘要：{{ s.snippet | truncate(200) }}
       {% endif %}
+      {% if s.text_excerpt %}
+      - 正文要点：{{ s.text_excerpt }}
+      {% endif %}
     {% endfor %}
 
     ## 2. 功能矩阵对比
@@ -66,7 +69,18 @@ templates:
     {% if s.snippet %}
     - **摘要**: {{ s.snippet | truncate(300) }}
     {% endif %}
+    {% if s.text_excerpt %}
+    - **正文要点**: {{ s.text_excerpt }}
+    {% endif %}
 
+    {% endfor %}
+
+    ## 关键内容要点
+
+    {% for s in sources %}
+    {% if s.text_excerpt %}
+    - **[{{ loop.index }}] {{ s.title | default("Untitled") }}**：{{ s.text_excerpt }}
+    {% endif %}
     {% endfor %}
 
     ## 总结
@@ -91,6 +105,9 @@ templates:
       - 链接：{{ s.url | default("-") }}
       {% if s.snippet %}
       - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+      {% if s.text_excerpt %}
+      - 正文要点：{{ s.text_excerpt }}
       {% endif %}
     {% endfor %}
 
@@ -136,6 +153,9 @@ templates:
       {% if s.snippet %}
       - 摘要：{{ s.snippet | truncate(200) }}
       {% endif %}
+      {% if s.text_excerpt %}
+      - 正文要点：{{ s.text_excerpt }}
+      {% endif %}
     {% endfor %}
 
     ## 2. 用户画像 & 需求
@@ -177,6 +197,9 @@ templates:
       {% if s.snippet %}
       - 摘要：{{ s.snippet | truncate(200) }}
       {% endif %}
+      {% if s.text_excerpt %}
+      - 正文要点：{{ s.text_excerpt }}
+      {% endif %}
     {% endfor %}
 
     ## 2. 对企业的直接影响
@@ -216,6 +239,9 @@ templates:
       - 链接：{{ s.url | default("-") }}
       {% if s.snippet %}
       - 摘要：{{ s.snippet | truncate(200) }}
+      {% endif %}
+      {% if s.text_excerpt %}
+      - 正文要点：{{ s.text_excerpt }}
       {% endif %}
     {% endfor %}
 
