@@ -1,0 +1,31 @@
+{
+  "version": "1.0.1",
+  "generated_at": "2026-09-17 01:01 UTC",
+  "scale": 3000,
+  "rounds": 3,
+  "metrics": {
+    "score_sec": [
+      4.1,
+      0.6,
+      0.6
+    ],
+    "conflict_sec": [
+      41.4,
+      39.1,
+      39.3
+    ],
+    "research_2k_sec": [
+      83.6,
+      83.6,
+      83.3
+    ],
+    "score_p50": 0.6,
+    "score_p95": 3.7,
+    "conflict_p50": 39.3,
+    "conflict_p95": 41.2,
+    "research_p50": 83.6,
+    "research_p95": 83.6
+  },
+  "conflicts_detected": 14,
+  "note": "P50/P95 需 rounds≥3；单轮时 metrics 为逐轮原始值"
+}
