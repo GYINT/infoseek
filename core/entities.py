@@ -26,6 +26,11 @@ v2.1.0 变更：所有实体已自动迁移含默认元数据（core/entity_meta
 每条目含 aliases（跨语言变体），用于词典匹配 NER。
 """
 
+import json
+import os
+import re
+from datetime import date
+from pathlib import Path
 from typing import List, Dict, Optional
 
 # ═══════════════════════════════════════════════════════════════
@@ -242,17 +247,166 @@ METRIC_ENTITIES = [
 # ═══════════════════════════════════════════════════════════════
 
 _ALL_ENTITIES_CACHE = None
+_LEARNED_CACHE = None
+
+
+def _learned_path() -> Path:
+    """动态回流实体文件（v1.7.7 包B）：INFOSEEK_DATA_DIR / ~/.infoseek。"""
+    d = os.environ.get('INFOSEEK_DATA_DIR')
+    base = Path(d) if d else (Path.home() / '.infoseek')
+    return base / 'entities_learned.json'
+
+
+def get_learned_entities(force: bool = False) -> List[Dict]:
+    """动态回流实体（v1.7.7 包B）。文件缺失/损坏 → []。"""
+    global _LEARNED_CACHE
+    if _LEARNED_CACHE is not None and not force:
+        return _LEARNED_CACHE
+    try:
+        p = _learned_path()
+        if p.exists():
+            data = json.loads(p.read_text(encoding='utf-8'))
+            if isinstance(data, list):
+                _LEARNED_CACHE = data
+                return data
+    except Exception:
+        pass
+    _LEARNED_CACHE = []
+    return []
+
+
+def learn_entity(name: str, aliases=None, category: str = 'AUTO',
+                 confidence: float = 0.5, min_len: int = 2) -> bool:
+    """回流单个实体（v1.7.7 包B：防噪声门控 + 幂等）。
+
+    门控：name 非空 / 长度 ≥ min_len / 非纯数字符号 / 不与静态词典重名。
+    幂等：已存在 → 合并 aliases + 刷新 last_seen_at。返回 True 表示发生写入。
+    """
+    global _LEARNED_CACHE, _ALL_ENTITIES_CACHE
+    name = (name or '').strip()
+    if len(name) < min_len or re.fullmatch(r'[\d\W_]+', name or ''):
+        return False
+    static_names = {e.get('name', '').lower() for e in
+                    (ORG_ENTITIES + PRODUCT_ENTITIES + TECH_ENTITIES
+                     + PERSON_ENTITIES + METRIC_ENTITIES)}
+    if name.lower() in static_names:
+        return False
+    today = date.today().isoformat()
+    learned = list(get_learned_entities(force=True))
+    aliases = [a for a in (aliases or []) if a and a != name]
+    # v1.7.7 包B：机构后缀自动衍生短名 alias（提升 query 命中率，
+    # 如「无限工坊科技」→「无限工坊」）
+    for _sfx in ('科技', '公司', '集团', '股份', '协会', '研究院', '大学', '实验室'):
+        if name.endswith(_sfx) and len(name) > len(_sfx) + 1:
+            _short = name[:-len(_sfx)]
+            if _short != name and _short not in aliases:
+                aliases.append(_short)
+            break
+    for e in learned:
+        if e.get('name', '').lower() == name.lower():
+            e['aliases'] = list(dict.fromkeys(list(e.get('aliases', [])) + aliases))
+            e['last_seen_at'] = today
+            break
+    else:
+        learned.append({
+            'name': name, 'aliases': aliases, 'category': category,
+            'created_at': today, 'last_seen_at': today,
+            'source': 'learned', 'confidence': float(confidence),
+        })
+    try:
+        p = _learned_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(learned, ensure_ascii=False, indent=2), encoding='utf-8')
+    except Exception:
+        return False
+    _LEARNED_CACHE = learned
+    _ALL_ENTITIES_CACHE = None   # 失效合并缓存（下次 NER 即见新实体）
+    return True
+
+
+def prune_learned_entities(max_age_days: int = 180,
+                           min_confidence: float = 0.3,
+                           active_names: Optional[set] = None,
+                           dry_run: bool = True) -> Dict:
+    """清理 learned 层冷 / 噪声实体（v2.0.0 实体持久层收尾，FreshnessCron 第 7 步）。
+
+    learn_entity 此前只增不减，entities_learned.json 会无限累积自动回流的候选
+    （pipeline reflow / person 运行时注册）。本函数给 learned 层补「冷条目清理」，
+    与 EntityTracker.apply_decay（state 层 hit 衰减）共同构成实体持久层生命周期闭环。
+
+    清理候选（两类，静态词典永不触碰）：
+      1. 冷条目：last_seen_at 距今 > max_age_days，且名字不在 active_names
+         （active_names 由调用方传入近期命中实体，如 tracker.get_stale_entities
+         的补集 / record_hit 热集合）；
+      2. 低置信噪声：confidence < min_confidence 且超龄（age > max_age_days），
+         高价值实体（person 注册等 confidence 较高）受 min_confidence 门控保护。
+
+    安全：默认 dry_run=True 只返回候选不落盘；FreshnessCron 默认即以此模式运行，
+    需显式 dry_run=False（或 env INFOSEEK_LEARNED_PRUNE_APPLY=1）才真正删除。
+    落盘采用 tmp + os.replace 原子写。返回 {'pruned','candidates','remaining','dry_run'}。
+    """
+    global _LEARNED_CACHE, _ALL_ENTITIES_CACHE
+    learned = list(get_learned_entities(force=True))
+    active = {n.lower() for n in (active_names or set())}
+    today = date.today()
+    candidates = []
+    kept = []
+    for e in learned:
+        name = e.get('name', '')
+        try:
+            age = (today - date.fromisoformat(e.get('last_seen_at', ''))).days
+        except Exception:
+            age = max_age_days + 1  # 日期缺失/损坏视为超龄候选
+        # active（近期仍命中）的实体完全保护：活跃即有用，噪声判据让位
+        is_active = name.lower() in active
+        cold = age > max_age_days and not is_active
+        low_conf = float(e.get('confidence', 0.5) or 0.0) < min_confidence
+        reason = None
+        if not is_active and age > max_age_days and low_conf:
+            reason = 'cold_low_conf'
+        elif cold:
+            # 超龄冷条目（含高置信长期未用）；低置信已在上面合并为 cold_low_conf
+            reason = 'cold'
+        if reason:
+            candidates.append({'name': name, 'age_days': age,
+                               'confidence': e.get('confidence', 0.5),
+                               'reason': reason})
+        else:
+            kept.append(e)
+
+    apply_env = os.environ.get('INFOSEEK_LEARNED_PRUNE_APPLY', '') in ('1', 'true', 'True')
+    do_apply = (not dry_run) or apply_env
+    written = False
+    if do_apply and candidates:
+        try:
+            p = _learned_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix('.tmp')
+            tmp.write_text(json.dumps(kept, ensure_ascii=False, indent=2),
+                           encoding='utf-8')
+            os.replace(str(tmp), str(p))
+            written = True
+            _LEARNED_CACHE = kept
+            _ALL_ENTITIES_CACHE = None
+        except Exception:
+            written = False
+    return {'pruned': len(candidates) if written else 0,
+            'candidates': candidates,
+            'remaining': len(kept) if written else len(learned),
+            'dry_run': not written,
+            'applied': written}
 
 
 def get_all_entities() -> List[Dict]:
-    """获取所有实体（合并 ORG/PRODUCT/TECH/PERSON/METRIC）
+    """获取所有实体（v1.7.7 包B：静态词典 + 动态回流实体）
 
-    v2.4.1 PATCH (DEF-E): 加模块级缓存 — 146 实体列表每次合并 5 个 list 看似简单，
-    但被 ner.extract_entities() 在 N 次循环外反复调用，缓存后节省 95% NER 时间。
+    v2.4.1 PATCH (DEF-E): 模块级缓存（NER 热路径）。
     """
     global _ALL_ENTITIES_CACHE
     if _ALL_ENTITIES_CACHE is None:
-        _ALL_ENTITIES_CACHE = ORG_ENTITIES + PRODUCT_ENTITIES + TECH_ENTITIES + PERSON_ENTITIES + METRIC_ENTITIES
+        static = (ORG_ENTITIES + PRODUCT_ENTITIES + TECH_ENTITIES
+                  + PERSON_ENTITIES + METRIC_ENTITIES)
+        _ALL_ENTITIES_CACHE = static + get_learned_entities()
     return _ALL_ENTITIES_CACHE
 
 
