@@ -37,6 +37,19 @@ def _get_lifecycle():
         return None
 
 
+def _boundary_preflight(cap_name: str):
+    """GA12：边界门控预检。门控关闭 / 模块异常 / 导入失败 → None（调用方按放行处理）。"""
+    try:
+        import os
+        if os.environ.get("INFOSEEK_BOUNDARY_GATE", "").lower() not in \
+                ("1", "true", "on", "yes"):
+            return None
+        from boundary_gate import preflight
+        return preflight(cap_name)
+    except Exception:
+        return None  # fail-open：边界治理自身故障不得阻断主调研链
+
+
 @dataclass
 class CompensateResult:
     result: object = None
@@ -44,6 +57,7 @@ class CompensateResult:
     trail: List[Tuple[str, str]] = field(default_factory=list)  # [(cap, status), ...]
     exhausted: bool = False              # 整条链均失败/不可用
     gap_flag: bool = False               # 是否标记为"能力缺口"（需人工核实）
+    boundary_restricted: bool = False    # GA12：是否有能力因网络边界被门控降级
 
 
 def compensate(cap_name: str,
@@ -76,6 +90,19 @@ def compensate(cap_name: str,
         if fn is None:
             out.trail.append((name, "no_handler"))
             attempted.append(name)
+            continue
+
+        # 2.5) GA12 网络边界预检（门控默认 OFF ⇒ 恒跳过，零行为变更）
+        #   开启后（INFOSEEK_BOUNDARY_GATE=1）：必需 host 不可达 → 显式降级，
+        #   不静默长超时；预检自身异常 fail-open（不阻断主链）。
+        pre = _boundary_preflight(name)
+        if pre is not None and not pre.get("allowed", True):
+            out.boundary_restricted = True
+            unreach = ",".join(pre.get("unreachable", [])[:3])
+            out.trail.append((name, f"boundary_restricted:{unreach}" if unreach
+                              else "boundary_restricted"))
+            attempted.append(name)
+            log.info(f"[代偿] 能力 '{name}' 网络边界受限（{unreach}），显式降级")
             continue
 
         attempted.append(name)
