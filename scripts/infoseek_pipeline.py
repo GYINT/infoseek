@@ -14,21 +14,46 @@ infoseek_pipeline.py — 锚点→采集→聚合 全链路调度器 (v1.2.0)
 """
 
 import concurrent.futures
-import json, os, sys, time, logging
+import json, os, sys, time, logging, threading
+import numpy as np
 from datetime import datetime
 
 # v1.0.1 评估升级：搜索引擎全生命周期管理（健康状态机 + 配额动态追踪）
 try:
     from engine_lifecycle import get_lifecycle
+    from engine_router import route_engines
 except ImportError:  # 独立运行回退
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from engine_lifecycle import get_lifecycle
+    from engine_router import route_engines
+
+from platform_adapter import platform_engines, platform_weight
 
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(levelname)s: %(message)s')
 log = logging.getLogger(__name__)
 
 # 导入单一真源模块
 from anchor_adapter import infos_to_seek
+# v1.8.4：原 _filter_relevant 函数体内 996-999「每次调用 sys.path.insert + 局部 import」
+# 已收口为顶层单次导入（消除 sys.path 单调膨胀 → import find_spec O(n²)，同 GA8 根因）。
+# ⚠️ 必须以**模块对象**方式引用（晚绑定），不可用 `from anchor_adapter import
+# compute_semantic_similarity`：from-import 会在导入期固化函数对象引用，使既有测试对
+# anchor_adapter 模块属性的 monkey-patch / mock.patch 全部失效（实测击穿 3 套件 9 项：
+# test_p1p3p2_fixes / test_recall_enhance_v101 / test_relevance_gate_v177）。
+# 属性访问在调用时求值 → patch 生效；守护见 tests/test_ga5_tokenizer_v184.py G13/G23。
+import anchor_adapter as _anchor_mod
+# GA5 分词单源化（v1.8.4）：唯一分词真源
+from text_tokenizer import tokenize_text
+# v1.9.0 GA9/GA10：人名消歧 + 跨语言别名桥接真源（core/ 下模块，顶层模块名导入）。
+# ⚠️ 必须模块对象方式引用（晚绑定），禁 from-import —— 与 _anchor_mod 同一铁律
+# （§8.13.3：from-import 早绑定击穿 mock/monkey-patch 契约；守护见 GA9/GA10 测试）。
+# sys.path 保障为模块导入期一次（幂等判重，GA8 纪律：禁止调用期 insert）。
+_XLING_CORE_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'core'))
+if _XLING_CORE_DIR not in sys.path:
+    sys.path.insert(0, _XLING_CORE_DIR)
+import xling_bridge as _xling_mod
+import person_ner as _person_mod
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -354,7 +379,7 @@ def _search_qveris(query: str, max_results: int = 5) -> list:
 
 def _ai_engines() -> list:
     """AI 键控冗余链：Exa → Tavily → 智谱（国内）→ 秘塔（国内）→ TinyFish → QVeris（结构化数据）。"""
-    return [
+    ai = [
         ("Exa", _search_exa),
         ("Tavily", _search_tavily),
         ("Zhipu", _search_zhipu),
@@ -362,6 +387,7 @@ def _ai_engines() -> list:
         ("TinyFish", _search_tinyfish),
         ("QVeris", _search_qveris),
     ]
+    return route_engines(ai)
 
 
 def _has_ai_key() -> bool:
@@ -379,17 +405,18 @@ def _has_ai_key() -> bool:
 _ENGINE_WEIGHT = {
     'Exa': 1.0, 'DuckDuckGo-HTML': 1.0, 'Bing-RSS': 0.9, 'Zhipu': 0.9,
     'Tavily': 0.9, 'QVeris': 0.9, 'Jina-AI': 0.8, 'Metaso': 0.8, 'Wikipedia': 0.7,
-    'TinyFish': 0.7, 'CN-AI-Web': 0.3,
+    'TinyFish': 0.7, 'CN-AI-Web': 0.3, 'WorkBuddy-WebSearch': platform_weight(),
 }
 
 def _free_engines() -> list:
     """免费引擎（无限量；默认层主力）。运行时构建（支持测试 monkeypatch）。"""
-    return [
+    free = [
         ("DuckDuckGo-HTML", _search_duckduckgo_html),
         ("Bing-RSS", _search_bing_rss),
         ("Jina-AI", _search_jina),
         ("Wikipedia", _search_wikipedia),
     ]
+    return route_engines(free)
 
 _KEY_ENV = {
     'Exa': 'EXA_API_KEY', 'Tavily': 'TAVILY_API_KEY', 'Zhipu': 'ZHIPU_API_KEY',
@@ -409,7 +436,46 @@ def _quota_engines_with_key() -> list:
 
 def _default_layer() -> list:
     """默认层：4 免费引擎 + CN 网页兜底（opt-in，内部自判）。"""
-    return _free_engines() + [("CN-AI-Web", _search_cn_web)]
+    return route_engines(_free_engines() + [("CN-AI-Web", _search_cn_web)] + platform_engines())  # 平台 adapter（探测失败 → []）
+
+
+# ─── v1.7.7 包D：引擎可观测（本轮状态快照）───
+_ENGINE_STATS = {}            # name -> {'ok','empty','fail','skip','err'}
+_ENGINE_STATS_LOCK = threading.Lock()
+
+
+def _stat(name: str, key: str, err: object = None) -> None:
+    with _ENGINE_STATS_LOCK:
+        st = _ENGINE_STATS.setdefault(
+            name, {'ok': 0, 'empty': 0, 'fail': 0, 'skip': 0, 'err': ''})
+        st[key] = st.get(key, 0) + 1
+        if err:
+            st['err'] = str(err)[:80]
+
+
+def engine_stats_snapshot(reset: bool = True) -> dict:
+    """本轮引擎状态快照（包D）。reset=True 取后清空。"""
+    with _ENGINE_STATS_LOCK:
+        snap = {k: dict(v) for k, v in _ENGINE_STATS.items()}
+        if reset:
+            _ENGINE_STATS.clear()
+    return snap
+
+
+def _log_engine_stats(query: str) -> None:
+    """输出本轮引擎状态汇总（INFOSEEK_ENGINE_STATS=0 关闭）。"""
+    if os.environ.get('INFOSEEK_ENGINE_STATS', '1') in ('0', 'false', 'False', 'no', 'off'):
+        return
+    snap = engine_stats_snapshot()
+    if not snap:
+        return
+    parts = []
+    for n, st in sorted(snap.items()):
+        tag = ('ok' if st['ok'] else ('empty' if st['empty'] else
+                                     ('skip' if st['skip'] else 'fail')))
+        extra = f",err={st['err']}" if tag == 'fail' and st['err'] else ''
+        parts.append(f"{n}:{tag}(ok={st['ok']},empty={st['empty']},fail={st['fail']}{extra})")
+    log.info(f"[engine-stats] '{query}' " + '; '.join(parts))
 
 
 def _call_engine(name: str, fn, query: str, max_results: int) -> list:
@@ -423,33 +489,258 @@ def _call_engine(name: str, fn, query: str, max_results: int) -> list:
     lc.reconcile(name)  # P3 新鲜度自愈：访问前先对账（仅异常态轻量变更，常态零开销）
     if lc.is_disabled(name):
         log.debug(f"[{name}] 引擎禁用中（健康/配额/认证），跳过")
+        _stat(name, 'skip')
         return []
     try:
         res = fn(query, max_results)
         lc.record_success(name, res)  # P3.3 传入响应做 API 漂移检测（默认关闭）
-        return [r for r in (res or []) if r.get('url')]
+        out = [r for r in (res or []) if r.get('url')]
+        _stat(name, 'ok' if out else 'empty')
+        return out
     except Exception as e:
         lc.record_failure(name, e)
+        _stat(name, 'fail', err=e)
         log.warning(f"[{name}] 搜索 '{query}' 失败: {e}")
         return []
 
 
+# ─── v1.x（G5）：搜索层并发控制 —— 常驻池 + 聚合窗口 ───
+_POOL = None
+
+# ─── v1.6.1（G5 P1/P2）：超窗计数降级 + 提前收敛 + 层间共享预算 ───
+_overrun_count = {}       # 引擎名 -> 连续超窗次数
+_muted_until = {}         # 引擎名 -> 降权静默截止（time.monotonic 绝对时间）
+_OVERRUN_LOCK = threading.Lock()
+
+
+def _early_factor() -> float:
+    """提前收敛倍数（env INFOSEEK_SEARCH_EARLY_FACTOR，默认 1.5；0 = 关闭）。
+
+    已完成引擎的去重合并结果 ≥ max_results×factor 时提前返回，不等满窗口。
+    """
+    try:
+        v = float(os.environ.get('INFOSEEK_SEARCH_EARLY_FACTOR', '1.5') or 1.5)
+        return max(0.0, v)
+    except (TypeError, ValueError):
+        return 1.5
+
+
+def _shared_budget() -> bool:
+    """层间共享总预算开关（env INFOSEEK_SEARCH_SHARED_BUDGET，默认 1 开）。"""
+    return _env_flag('INFOSEEK_SEARCH_SHARED_BUDGET', True)
+
+
+def _total_budget_s() -> float:
+    """层间共享总预算秒（env INFOSEEK_SEARCH_TOTAL_BUDGET_MS，默认 = WINDOW_MS）。"""
+    try:
+        raw = os.environ.get('INFOSEEK_SEARCH_TOTAL_BUDGET_MS', '')
+        if raw != '':
+            return max(0.0, float(raw)) / 1000.0
+    except (TypeError, ValueError):
+        pass
+    return _window_s()
+
+
+def _overrun_limit() -> int:
+    """连续超窗降级阈值（env INFOSEEK_SEARCH_OVERRUN_LIMIT，默认 2；0 = 关闭降级）。"""
+    try:
+        return max(0, int(os.environ.get('INFOSEEK_SEARCH_OVERRUN_LIMIT', '2') or 2))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _overrun_mute_s() -> float:
+    """降权冷却秒（env INFOSEEK_SEARCH_OVERRUN_MUTE_S，默认 60；0 = 静默到进程结束）。"""
+    try:
+        return max(0.0, float(os.environ.get('INFOSEEK_SEARCH_OVERRUN_MUTE_S', '60') or 60))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _note_overruns(names) -> None:
+    """窗口到期仍未完成的引擎 → 连续超窗计数；达阈值 → 临时降权（mute）。
+
+    计数在触发 mute 后清零（冷却结束可重新积累）；限次后冷却期内 _filter_muted
+    不再拉起该引擎（健康记录仍由线程内 _call_engine 正常完成）。
+    """
+    lim = _overrun_limit()
+    if lim <= 0:
+        return
+    now = time.monotonic()
+    mute_s = _overrun_mute_s()
+    with _OVERRUN_LOCK:
+        for n in names:
+            c = _overrun_count.get(n, 0) + 1
+            if c >= lim:
+                _overrun_count[n] = 0
+                _muted_until[n] = now + mute_s
+                log.warning(f"[overrun] 引擎 '{n}' 连续 {lim} 次超窗 → 临时降权 "
+                            f"{mute_s:.0f}s（INFOSEEK_SEARCH_OVERRUN_MUTE_S）")
+            else:
+                _overrun_count[n] = c
+
+
+def _is_muted(name: str) -> bool:
+    """引擎当前是否处于降权静默期（到期自动复活）。"""
+    with _OVERRUN_LOCK:
+        return time.monotonic() < _muted_until.get(name, 0.0)
+
+
+def _filter_muted(engines: list) -> list:
+    """剔除降权静默期引擎（不破坏原列表顺序）。"""
+    return [(n, f) for n, f in engines if not _is_muted(n)]
+
+
+def _reset_overrun_state() -> None:
+    """测试钩子：清空超窗计数与静默表。"""
+    with _OVERRUN_LOCK:
+        _overrun_count.clear()
+        _muted_until.clear()
+
+
+def _search_deadline():
+    """层间共享总预算 deadline（P2）：共享开关关闭或窗口=0 → None（原语义）。"""
+    if not _shared_budget() or _window_s() <= 0:
+        return None
+    return time.monotonic() + _total_budget_s()
+
+
+def _remaining_budget(deadline) -> float:
+    """剩余预算秒（deadline 为 None → 0，便于日志与门控）。"""
+    if deadline is None:
+        return 0.0
+    return deadline - time.monotonic()
+
+
+def _sleep_throttle(deadline) -> None:
+    """层间限速 0.8s。
+
+    共享预算模式（deadline 非 None）：剩余预算不足 0.8s 时跳过限速，
+    把时间留给下一层（预算就是节流，延迟上界优先）。
+    """
+    if deadline is None:
+        time.sleep(0.8)
+        return
+    if deadline - time.monotonic() >= 0.8:
+        time.sleep(0.8)
+
+
+def _max_workers() -> int:
+    """并发上限（env INFOSEEK_SEARCH_MAX_WORKERS，默认 12）。"""
+    try:
+        return max(1, int(os.environ.get('INFOSEEK_SEARCH_MAX_WORKERS', '12') or 12))
+    except (TypeError, ValueError):
+        return 12
+
+
+def _window_s() -> float:
+    """聚合窗口秒（env INFOSEEK_SEARCH_WINDOW_MS，默认 8000ms；0 = 关闭 → 原语义）。"""
+    try:
+        raw = os.environ.get('INFOSEEK_SEARCH_WINDOW_MS', '8000')
+        return max(0.0, float(raw if raw != '' else 8000) / 1000.0)
+    except (TypeError, ValueError):
+        return 8.0
+
+
+def _get_pool():
+    """进程级常驻线程池（懒创建；atexit 非阻塞关闭）。
+
+    为何常驻：原 `with ThreadPoolExecutor(...)` 退出时 shutdown(wait=True)，
+    会把聚合窗口省下的时间又等回来 —— 池常驻后单次调用退出不再阻塞。
+    """
+    global _POOL
+    if _POOL is None:
+        _POOL = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_max_workers(), thread_name_prefix='infoseek-eng')
+        try:
+            import atexit
+            atexit.register(lambda: _POOL and _POOL.shutdown(wait=False))
+        except Exception:
+            pass
+    return _POOL
+
+
+def _reset_pool() -> None:
+    """测试钩子：关闭并重建常驻池（env 变更后需调用）。"""
+    global _POOL
+    if _POOL is not None:
+        try:
+            _POOL.shutdown(wait=False)
+        except Exception:
+            pass
+        _POOL = None
+
+
 def _parallel_merge(engines: list, query: str, max_results: int,
-                    max_workers: int = 4) -> list:
+                    max_workers: int | None = None,
+                    deadline: float | None = None) -> list:
     """层内并用：并行调用 + url 去重 + 组间权重/组内保序 → top-N。
 
     引擎失败相互隔离（异常仅记录）；返回结构 [{url,title,snippet}]。
     集成生命周期：自动剔除禁用引擎 + 调用经 _call_engine 包装（记录健康/配额）。
+
+    v1.x（G5）并发优化：
+      - 常驻池：避免 with 退出 shutdown(wait=True) 阻塞（层耗时不再等于最慢引擎）
+      - 聚合窗口：wait(timeout=window) 到期即聚合返回，未达引擎结果丢弃；
+        其健康记录仍由线程内 _call_engine 正常完成（不误杀引擎）
+      - window=0 或单引擎 → 退回 as_completed 原语义
+      - max_workers 参数仅兼容保留；并发上限由常驻池 env 统一控制
+
+    v1.6.1（G5 P1/P2）：
+      - deadline 参数：外部传入绝对截止时间（层间共享总预算）；None → 本层窗口内自算
+      - 提前收敛：已完成引擎的去重合并结果 ≥ max_results×EARLY_FACTOR
+        即提前返回（FIRST_COMPLETED 轮询，不等满窗）
+      - 超窗降级：窗口到期未完成引擎记连续超窗，达阈值后临时 mute
+        （_filter_muted 后续调用不拉起；冷却后复活）
     """
     collected = {name: [] for name, _ in engines}
-    # 生命周期：剔除禁用引擎（健康/配额/认证）
+    # 生命周期：剔除禁用引擎（健康/配额/认证）+ 降权静默期引擎
     engines = get_lifecycle().get_active(engines)
+    engines = _filter_muted(engines)
     if not engines:
         return []
-    with concurrent.futures.ThreadPoolExecutor(
-            max_workers=min(max_workers, max(1, len(engines)))) as ex:
-        futs = {ex.submit(_call_engine, name, fn, query, max_results): name
-                for name, fn in engines}
+    pool = _get_pool()
+    futs = {pool.submit(_call_engine, name, fn, query, max_results): name
+            for name, fn in engines}
+    window = _window_s()
+    if window > 0 and len(engines) > 1:
+        endpoint = deadline if deadline is not None else time.monotonic() + window
+        factor = _early_factor()
+        early_n = int(max_results * factor) if factor > 0 else 0
+        seen = set()
+        got_n = 0
+        remaining = endpoint - time.monotonic()
+        while futs and remaining > 0:
+            done, pending = concurrent.futures.wait(
+                futs, timeout=remaining,
+                return_when=concurrent.futures.FIRST_COMPLETED)
+            for f in done:
+                name = futs.pop(f)
+                try:
+                    rs = [r for r in (f.result() or []) if r.get('url')]
+                    collected[name] = rs
+                    for r in rs:
+                        if r['url'] not in seen:
+                            seen.add(r['url'])
+                            got_n += 1
+                except Exception as e:
+                    log.warning(f"[{name}] 并行搜索 '{query}' 失败: {e}")
+            remaining = endpoint - time.monotonic()
+            if early_n and got_n >= early_n:
+                # 提前收敛：尽力取消未达引擎（健康记录仍由线程完成），不误记超窗
+                for f in tuple(pending):
+                    if f in futs:
+                        f.cancel()
+                        collected.pop(futs[f], None)
+                        del futs[f]
+                log.info(f"[early] '{query}' 已收敛 {got_n} ≥ {early_n} 条（提前返回）")
+                break
+        if futs:  # 窗口到期仍有未完成 → 超窗计数 + 丢弃结果
+            _note_overruns([futs[f] for f in tuple(futs)])
+            for f in tuple(futs):
+                f.cancel()
+                collected.pop(futs[f], None)
+    else:
         for f in concurrent.futures.as_completed(futs):
             name = futs[f]
             try:
@@ -534,20 +825,90 @@ def _expand_query(query: str) -> str:
             _s.path.insert(0, str(_root))
         from core.entities import get_all_entities
         ql = query.lower()
+
+        # v1.6.2 P3 词边界（补全）：实体命中匹配与 ner.py 同语义——
+        # 拉丁/数字词强制词边界（'pe' 不命中 'openai'），中文词保持子串。
+        def _q_hit(n: str) -> bool:
+            nl = (n or '').lower()
+            if not nl:
+                return False
+            if _re.search(r'[a-z0-9]', nl):
+                try:
+                    return _re.search(
+                        r'(?<![a-z0-9_])' + _re.escape(nl) + r'(?![a-z0-9_])', ql
+                    ) is not None
+                except Exception:
+                    return nl in ql
+            return nl in ql
+
         hits = []
         for e in get_all_entities():
             names = [e.get('name', '')] + list(e.get('aliases', []) or [])
-            if any(n and str(n).lower() in ql for n in names):
+            if any(_q_hit(n) for n in names):
                 hits.append(e)
         extra = []
         for e in hits:
-            for a in (e.get('aliases', []) or []):
+            # v1.7.7 包B：候选扩展词含实体正名（query 命中别名/短名时补正名，反向扩展；
+            # 如「无限工坊」→ 补「无限工坊科技」，提升召回覆盖）
+            for a in ([e.get('name', '')] + list(e.get('aliases', []) or [])):
                 if a and a.lower() not in ql and a not in extra:
                     extra.append(a)
                 if len(extra) >= 3:
                     break
             if len(extra) >= 3:
                 break
+
+        # v2.5.0 G3 (P2-1): 图谱邻域召回——复用跨 research 累积的会话图谱，
+        # 追加邻居实体词（≤2/实体，总上限 4，weight≥0.2 过滤弱关联）。
+        # 冷启动无图谱 → 纯别名扩展（零行为变化）；噪声由 _filter_relevant 门控兜底。
+        # 导入统一走顶层 entity_graph（与 infoseek_core_v2 注册端一致，避免
+        # core.entity_graph 双模块状态分裂）。
+        if _env_flag('INFOSEEK_RECALL_GRAPH', True) and len(extra) < 4:
+            try:
+                _core_dir = _P(__file__).parent.parent / 'core'
+                if str(_core_dir) not in _s.path:
+                    _s.path.insert(0, str(_core_dir))
+                from entity_graph import get_global_graph
+                g = get_global_graph()
+                if g is not None:
+                    graph_extra = []
+                    for e in hits:
+                        for nb in g.get_neighbors(e['name'], top_n=2):
+                            nname = nb['entity_name']
+                            if (nname.lower() not in ql and nname not in extra
+                                    and nname not in graph_extra
+                                    and nb.get('weight', 0) >= 0.2):
+                                graph_extra.append(nname)
+                            if len(graph_extra) >= 4 - len(extra):
+                                break
+                        if len(extra) + len(graph_extra) >= 4:
+                            break
+                    if graph_extra:
+                        log.info(f"[recall] 图谱邻域 '{query}' → +{graph_extra}")
+                        extra.extend(graph_extra)
+            except Exception:
+                pass
+
+        # v1.9.0 GA9⑤/GA10：跨语言别名扩展（中→拼音→拉丁，提升跨语言源召回）
+        # + 人名实体引导注册（D2 闭合：融合链/NER 可按人名索引源文本）。
+        # 拼音别名与词典别名互补（BYD 类已被实体通道扩出 → exclude 去重）；
+        # 总预算 4 → 6（人名类 query 专属增量，非人名 query 零变化）；
+        # 噪声仍由 _filter_relevant 相关性门控兜底（§8.11.2 ③：生成端不硬判）。
+        if _env_flag('INFOSEEK_XLING_BRIDGE', True) and len(extra) < 6:
+            try:
+                xtra = _xling_mod.expansion_aliases(
+                    query, cap=6 - len(extra), exclude_lower=ql,
+                    exclude={e.lower() for e in extra})
+                if xtra:
+                    log.info(f"[recall] 跨语言别名扩展 '{query}' → +{xtra}")
+                    extra.extend(xtra)
+            except Exception:
+                pass
+        try:
+            _person_mod.bootstrap_subject(query)  # 幂等；失败静默不阻断召回
+        except Exception:
+            pass
+
         if extra:
             log.info(f"[recall] query 扩展 '{query}' → +{extra}")
             return (query + ' ' + ' '.join(extra)).strip()
@@ -584,8 +945,58 @@ def _merge_diverse(collected: dict, max_results: int, query: str) -> list:
     return merged
 
 
+# v1.7.7 包A：相关性门控 v2 常量
+_RELEVANCE_TOP_RATIO = 0.6      # 保底相对阈值（0.6 × top1）
+# v1.8.4：_RELEVANCE_WARNED 已移除 —— jieba 缺失一次性告警迁至 text_tokenizer
+
+
+def _tokenize_query(query: str) -> set:
+    """query 主体词提取（v1.7.7 包A / P0#2；v1.8.4 GA5 单源化委托）
+
+    **实现已收敛至唯一真源 `text_tokenizer.tokenize_text()`**（GA5 闭合）——本函数退化为
+    薄封装，仅为向后兼容 `_filter_relevant` 调用点与 `test_relevance_gate_v177` 断言保留名字。
+
+    `require_chinese=True`：纯英文/数字 query 返回空集（有意门控，服务「中文多字词硬门槛」
+    ——纯英文 query 不触发中文门槛）；`warn_on_fallback=True`：jieba 缺失发一次性告警
+    （原 `_RELEVANCE_WARNED` 语义，此前静默 except 使多字词硬门槛完全失效，'无限工坊'
+    类主题漂移因此漏检）。
+
+    与 `anchor_adapter._tokenize_subject` 除上述门控外**算法完全同源**（v1.8.4 前为两份
+    独立实现，v1.8.2 仅对齐回退算法；审计 P1-1「同算法」声明曾被实测证伪）。
+    """
+    return tokenize_text(query, require_chinese=True, warn_on_fallback=True)
+
+
+def _llm_judge_relevance(text: str, query: str) -> float:
+    """v1.7.7 包C：LLM 复判相关性（opt-in，INFOSEEK_RELEVANCE_LLM=1）。
+
+    返回 0-100 分；未启用 / 不可用 / 解析失败 → -1（调用方回落规则分）。
+    仅对边缘样本调用（控成本）。
+    """
+    if os.environ.get('INFOSEEK_RELEVANCE_LLM', '0') not in ('1', 'true', 'True', 'yes', 'on'):
+        return -1.0
+    try:
+        import sys as _s
+        from pathlib import Path as _P
+        _core = _P(__file__).parent.parent / 'core'
+        if str(_core) not in _s.path:
+            _s.path.insert(0, str(_core))
+        from llm_router import llm_call
+        prompt = ('判断下面文本与检索主题的相关性，只输出一个 0-100 的整数'
+                  '（0=完全无关，100=高度相关）：\n'
+                  f'主题：{query}\n文本：{(text or "")[:400]}\n分数：')
+        out = llm_call(prompt, max_tokens=8)
+        content = (out or {}).get('content', '') if isinstance(out, dict) else str(out)
+        m = _re.search(r'\d{1,3}', content or '')
+        if not m:
+            return -1.0
+        return float(min(100, max(0, int(m.group(0)))))
+    except Exception:
+        return -1.0
+
+
 def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
-    """主题相关性过滤（v1.0.1 PATCH / P1-2）
+    """主题相关性过滤（v1.0.1 PATCH / P1-2；v1.7.7 包A 门控 v2）
 
     两层判定：
     1. 语义分阈值：title+snippet 与 query 的 Jaccard 相似度 ≥ min_score
@@ -602,39 +1013,81 @@ def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
     #   候选少（<6）→ 门槛 10 保召回；候选多（>20）→ 门槛 14 滤噪；否则 12。
     if _env_flag('INFOSEEK_RECALL_ADAPTIVE', True):
         n = len(results)
-        min_score = 14 if n > 20 else (10 if n < 6 else 12)
+        # v1.7.7 包A（P1#5）：下限固定 12（候选少不放松，宁走覆盖门控）
+        min_score = 14 if n > 20 else 12
     try:
-        import sys as _sys
-        from pathlib import Path as _P
-        _sys.path.insert(0, str(_P(__file__).parent.parent / 'scripts'))
-        from anchor_adapter import compute_semantic_similarity
-
-        # 多字词硬门槛（仅中文 query 启用）
-        hard_words = set()
-        if _re.search(r'[\u4e00-\u9fff]', query):
-            try:
-                import jieba
-                hard_words = {w.strip().lower() for w in jieba.lcut(query)
-                              if len(w.strip()) >= 2}
-            except Exception:
-                hard_words = set()
+        # v1.8.4：原 996-999 的函数体内 sys.path.insert + 局部 import 已删除 ——
+        # 改用顶层模块对象 _anchor_mod 属性访问（见文件头），sys.path 恒定不膨胀，
+        # 且保留晚绑定语义（mock.patch('anchor_adapter.*') 仍可生效）。
+        # 多字词硬门槛（仅中文 query 启用）；v1.7.7 包A（P0#2）：
+        # 统一走 _tokenize_query（jieba 优先 → 缺失回退 + 告警，不再静默失效）
+        hard_words = set(_tokenize_query(query))
 
         kept = []
         for r in results:
             text = ' '.join(filter(None, [r.get('title', ''), r.get('snippet', '')]))
-            score = compute_semantic_similarity(text, query)
-            if score < min_score:
-                continue
-            if hard_words:
+            # v1.0.1b 口径对齐（P1 2026-09-10）：max(Jaccard, 字符串包含×0.8)
+            # Jaccard 关键词提取对短中文主题过严（n-gram 滑动窗口致
+            # 主题词单字不交集 → 中文结果普遍 ~0 分），containment 兜底
+            # 让真实中文搜索结果可评分；0 分垃圾（完全不含主题词）仍有保底拦截。
+            jaccard = _anchor_mod.compute_semantic_similarity(text, query)
+            try:
+                containment = _anchor_mod._string_containment_similarity(text, query) or 0
+            except Exception:
+                containment = 0
+            score = max(jaccard, containment * 0.8)
+            # v1.7.7 包C：LLM 复判（opt-in，仅边缘样本控成本；失败回落规则分）
+            if (min_score - 5) <= score <= (min_score + 15):
+                _ls = _llm_judge_relevance(text, query)
+                if _ls >= 0:
+                    score = _ls
+                    r['relevance_llm'] = _ls
+            r['relevance'] = score  # 全量落分（P1 保底窗口数据底座）
+            # v1.9.0 GA10：跨语言别名桥接（D1 召回侧闸门）——中文 query × 拉丁文源
+            # 语义低分/中文多字词零交集时，subject 人名拼音别名 / 实体拉丁别名
+            # 词边界命中 → 豁免双门槛（英文一手源不再被中文硬门槛整体拦截）。
+            # 未触发（无别名组/无命中/env off）→ bridge=0，判定路径与 v1.8.4 完全一致。
+            # ⚠️ _xling_mod 模块对象属性访问（晚绑定），禁 from-import（§8.13.3 铁律）。
+            _passed = score >= min_score
+            if _passed and hard_words:
                 text_lower = text.lower()
-                if not any(w in text_lower for w in hard_words):
-                    continue  # 多字词无交集 → 单字/噪音匹配，剔除
-            r['relevance'] = score
+                _passed = any(w in text_lower for w in hard_words)
+            if not _passed:
+                try:
+                    _br = _xling_mod.bridge_score(text, query) or 0
+                except Exception:
+                    _br = 0
+                if _br >= min_score:
+                    r['relevance'] = max(score, _br)
+                    r['xling_bridge'] = _br
+                    _passed = True
+            if not _passed:
+                continue
             kept.append(r)
-        if len(kept) >= _min_expected(max(3, len(results))):
+        min_expected = _min_expected(max(3, len(results)))
+        if len(kept) >= min_expected:
             log.info(f"[relevance] '{query}' 过滤 {len(results)}→{len(kept)} 条")
             return kept
-        return results
+        # P1 保底加固（2026-09-10）：结果不足预期时不再裸返全量原始列表
+        # （此前会把 0 分 / SEO 克隆站群全量保送；且 kept 为空时返回的是未落分原始条目）。
+        # 降级策略：分数兜底窗口 —— 保留 relevance ≥ 绝对下限的条目按分降序取 top，
+        #             连下限都无达标 → 返回 []（宁缺毋滥，空结果由下游覆盖门控处理）。
+        floor = max(8, int(min_score * 0.5))
+        # v1.7.7 包A（P0#1）：相对阈值 —— 保底不低于 top1 的 60%，杜绝低分陪跑
+        _top1 = max((r.get('relevance', 0) for r in results), default=0)
+        floor = max(floor, int(_top1 * _RELEVANCE_TOP_RATIO))
+        try:
+            floor = int(os.environ.get('INFOSEEK_RELEVANCE_FLOOR', floor))
+        except ValueError:
+            pass  # env 非法 → 保持默认下限
+        fallback = sorted((r for r in results if r.get('relevance', 0) >= floor),
+                          key=lambda r: r.get('relevance', 0), reverse=True)
+        if fallback:
+            log.warning(f"[relevance] '{query}' 过滤后 {len(kept)} 条 < 预期 {min_expected}；"
+                        f"保底窗口保留 {len(fallback)} 条（≥{floor} 分，按分降序）")
+            return fallback[:min_expected]
+        log.warning(f"[relevance] '{query}' 无达标结果（全部 <{floor} 分），返回空（宁缺毋滥）")
+        return []
     except Exception:
         return results
 
@@ -658,34 +1111,62 @@ def _reserve_pool(ai_mode: bool, engines: list) -> list:
 
 
 def _parallel_merge_with_reserve(engines: list, query: str, max_results: int,
-                                 reserve_pool: list) -> list:
+                                 reserve_pool: list,
+                                 deadline: float | None = None) -> list:
     """层内并用 + 动态保留（层内冗余）：
 
       1. 主并行：除保留引擎外的全部引擎（md5 轮换选保留者，无状态可复现）
       2. 质量门控：并行结果 < min_expected 时触发保留引擎兜底（可双保留）
       3. 保留补充结果追加尾部（补充语义，不抢占），返回 top-N
+
+    v1.6.1（G5 P1）：保留兜底纳入同一窗口预算 ——
+      - deadline 为 None 时以本函数起点推导总预算（等价原窗口语义）
+      - 主并行结果不足且预算仍有剩余 → 保留引擎并行提交、并入剩余预算等待
+        （不再 sleep(0.8) 串行兜底，总耗时受预算上界约束）
+      - 预算耗尽（remaining ≤ 0.05s）→ 跳过兜底直接返回（延迟上界优先）
     """
     if not reserve_pool:
-        return _parallel_merge(engines, query, max_results)
+        return _parallel_merge(engines, query, max_results, deadline=deadline)
     import hashlib
     idx = int(hashlib.md5(query.encode('utf-8')).hexdigest(), 16) % len(reserve_pool)
     reserved = [reserve_pool[idx]]
     reserved_names = {n for n, _ in reserved}
     main = [e for e in engines if e[0] not in reserved_names]
-    got = _parallel_merge(main, query, max_results)
+    endpoint = deadline if deadline is not None else time.monotonic() + _window_s()
+    got = _parallel_merge(main, query, max_results, deadline=endpoint)
     if len(got) < _min_expected(max_results):
+        remaining = endpoint - time.monotonic()
+        if remaining <= 0.05:
+            log.info(f"[reserved] '{query}' 预算已耗尽（remaining={remaining:.2f}s），"
+                     f"跳过兜底（共 {len(got)} 条）")
+            return got[:max_results]
         got = [dict(r) for r in got]
         seen = {r['url'] for r in got}
+        pool = _get_pool()
+        rfuts = {}
         for rname, rfn in reserved:
+            if _is_muted(rname):
+                continue
+            rfuts[pool.submit(_call_engine, rname, rfn, query, max_results)] = rname
+        if rfuts:
             try:
-                time.sleep(0.8)
-                for r in (_call_engine(rname, rfn, query, max_results) or []):
-                    if r.get('url') and r['url'] not in seen:
-                        seen.add(r['url'])
-                        got.append(r)
-                log.info(f"[{rname}:reserved] '{query}' 兜底补充 → {len(got)} 条")
+                done, pending = concurrent.futures.wait(rfuts, timeout=remaining)
+                for f in done:
+                    rname = rfuts[f]
+                    try:
+                        for r in (f.result() or []):
+                            if r.get('url') and r['url'] not in seen:
+                                seen.add(r['url'])
+                                got.append(r)
+                        log.info(f"[{rname}:reserved] '{query}' 兜底补充 → {len(got)} 条")
+                    except Exception as e:
+                        log.warning(f"[{rname}:reserved] '{query}' 兜底失败: {e}")
+                if pending:
+                    _note_overruns([rfuts[f] for f in pending])
+                    for f in pending:
+                        f.cancel()
             except Exception as e:
-                log.warning(f"[{rname}:reserved] '{query}' 兜底失败: {e}")
+                log.warning(f"[reserved] '{query}' 兜底异常: {e}")
     return got[:max_results]
 
 
@@ -729,29 +1210,46 @@ def search_web(query: str, max_results: int = 10) -> list:
     if _env_flag('INFOSEEK_RECALL_EXPAND', True):
         query = _expand_query(query)
     if os.environ.get('INFOSEEK_SEARCH_PARALLEL', '1') == '0':
-        return _filter_relevant(_search_web_serial(query, max_results), query)
+        got_serial = _filter_relevant(_search_web_serial(query, max_results), query)
+        _log_engine_stats(query)
+        return got_serial
     ai_mode = os.environ.get('INFOSEEK_SEARCH_ENGINE', 'auto') == 'ai'
-    time.sleep(0.8)  # 层间限速
+    deadline = _search_deadline()  # G5 P2：层间共享总预算（None = 原语义各层各耗窗口）
+    if deadline is None:
+        time.sleep(0.8)  # 层间限速（原语义：进函数先限速）
+    # 共享预算模式：不预扣 0.8s，预算本身即节流；层间回退时再限速
     if ai_mode and _has_ai_key():
         # AI 模式：AI 引擎（权重高）+ 免费引擎全并行，免费引擎为保留池
         ai_layer = _ai_engines() + _free_engines()
         got = _parallel_merge_with_reserve(ai_layer, query, max_results,
                                            get_lifecycle().get_active(
-                                               _reserve_pool(True, ai_layer)))
+                                               _reserve_pool(True, ai_layer)),
+                                           deadline=deadline)
         if got:
             log.info(f"[AI-layer] '{query}' → {len(got)} 条（并行合并）")
-            return _filter_relevant(got, query)
-        log.warning("[AI-layer] 结果为空，回退默认层")
-        time.sleep(0.8)
+            _got = _filter_relevant(got, query)
+            _log_engine_stats(query)
+            return _got
+        log.warning("[AI-layer] 结果为空，回退默认层"
+                    + (f"（剩余预算 {_remaining_budget(deadline):.2f}s）" if deadline else ""))
+        _sleep_throttle(deadline)
     # 默认层：免费并行 + 限量引擎保留池（配额保护）
     default_layer = _default_layer()
+    if _env_flag('INFOSEEK_CONCURRENT_ALL', False):
+        default_layer = default_layer + _quota_engines_with_key()
+        log.info('[concurrent-all] 付费引擎并入主并行（INFOSEEK_CONCURRENT_ALL=1）')
+
     got = _parallel_merge_with_reserve(default_layer, query, max_results,
                                        get_lifecycle().get_active(
-                                           _reserve_pool(False, default_layer)))
+                                           _reserve_pool(False, default_layer)),
+                                       deadline=deadline)
     if got:
         log.info(f"[default-layer] '{query}' → {len(got)} 条（并行合并）")
-        return _filter_relevant(got, query)
+        _got = _filter_relevant(got, query)
+        _log_engine_stats(query)
+        return _got
     log.warning(f"搜索降级链全失败: '{query}'")
+    _log_engine_stats(query)
     return []
 
 
@@ -803,11 +1301,13 @@ def industry_to_anchors(industry: str, min_anchors: int = 3) -> list:
 # 阶段 0.5: 名称类锚点→URL自动搜索（新增, P0-B）
 # ═══════════════════════════════════════════════════════════════
 
-def search_name_to_url(name: str, platform: str = "", min_results: int = 2) -> list:
+def search_name_to_url(name: str, platform: str = "", min_results: int = 2,
+                       prefer_kb: bool = False) -> list:
     """
     将名称/频道名类锚点通过 web search 转换为 URL 列表。
     v1.0.0：改用 search_web 降级链（DDG HTML → Bing RSS → Wikipedia）；
     结果低于 min_results 时显式返回 []（覆盖率门控，不再静默返回单条假结果）。
+    v1.7.2：prefer_kb（多域交集场景）时对命中 KB 域的结果加分并上浮排序。
     输入: "丁鹏", platform="综合"
     输出: [{url, title, score}, ...]
     """
@@ -842,6 +1342,29 @@ def search_name_to_url(name: str, platform: str = "", min_results: int = 2) -> l
             f"名称搜索 '{name}' 覆盖率不足: 仅 {len(results)} 条（要求 ≥ {min_results}）。"
             f"显式返回空列表。")
         return []
+
+    # v1.7.2 prefer_kb（交集场景）：KB 域命中结果加分并上浮（单源 kb_intersect_bonus）
+    if prefer_kb:
+        try:
+            import re as _re
+            from domain_router import kb_intersect_bonus
+            from trusted_kb import kb_lookup
+            kb_domains = set()
+            for h in kb_lookup(name, limit=5):
+                m = _re.search(r'https?://([^/]+)', h.get('entry', '') or '')
+                if m:
+                    kb_domains.add(m.group(1))
+            for r in results:
+                m = _re.search(r'https?://([^/]+)', r.get('url', '') or '')
+                dom = m.group(1) if m else ''
+                if dom and dom in kb_domains:
+                    r['_kb_domain'] = dom
+                    r['score'] = min(100, r.get('score', 65)
+                                     + kb_intersect_bonus({'_kb_domain': dom, '_kb_hit_count': 1}))
+            results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        except ImportError:
+            pass
+
     return results
 
 
@@ -1050,15 +1573,26 @@ def _tier3_execute(url: str) -> dict:
 # 阶段 4: 治理反馈生成（新增, P1-D）
 # ═══════════════════════════════════════════════════════════════
 
+# v1.7.6 G2-2：低相关成功源温和降权阈值（relevance < 阈值 → 质量反馈）
+_QUALITY_RELEVANCE_MIN = 20
+
+
 def generate_feedback(details: list) -> list:
-    """从失败结果生成锚点降级建议"""
+    """治理反馈生成（唯一真源，v1.7.6）。
+
+    两类反馈：
+      1. failure：dead_link / failed / needs_tier2 → 降权 −20 / −10
+      2. quality（v1.7.6 G2-2）：success/partial 但 relevance < _QUALITY_RELEVANCE_MIN
+         → 温和降权 −5（填补"成功但低质"治理盲区）
+    """
     feedbacks = []
     for r in details:
+        anchor = r.get("anchor", {})
         status = r.get("status")
         if status in ("dead_link", "failed", "needs_tier2"):
-            anchor = r.get("anchor", {})
             penalty = -20 if status == "dead_link" else -10
             feedbacks.append({
+                "feedback_type": "failure",
                 "anchor_name": anchor.get("name", "?"),
                 "anchor_platform": anchor.get("platform", "?"),
                 "anchor_entry": anchor.get("entry", "?"),
@@ -1068,6 +1602,27 @@ def generate_feedback(details: list) -> list:
                 "suggested_penalty": penalty,
                 "suggested_new_score": max(0, (anchor.get("score", 0) or 0) + penalty)
             })
+        elif status in ("success", "partial"):
+            rel = r.get("relevance")
+            if rel is None:
+                rel = (r.get("output") or {}).get("relevance")
+            try:
+                rel = float(rel) if rel is not None else None
+            except (TypeError, ValueError):
+                rel = None
+            if rel is not None and rel < _QUALITY_RELEVANCE_MIN:
+                penalty = -5
+                feedbacks.append({
+                    "feedback_type": "quality",
+                    "anchor_name": anchor.get("name", "?"),
+                    "anchor_platform": anchor.get("platform", "?"),
+                    "anchor_entry": anchor.get("entry", "?"),
+                    "original_score": anchor.get("score", 0),
+                    "failure_type": "low_relevance",
+                    "failure_reason": f"relevance={rel} < {_QUALITY_RELEVANCE_MIN}",
+                    "suggested_penalty": penalty,
+                    "suggested_new_score": max(0, (anchor.get("score", 0) or 0) + penalty)
+                })
     return feedbacks
 
 
@@ -1076,11 +1631,16 @@ def generate_feedback(details: list) -> list:
 # ═══════════════════════════════════════════════════════════════
 
 def execute_anchor(anchor: dict, output_dir: str) -> dict:
-    """对单个锚点执行完整 infoseek 流水线（含异常保护）"""
+    """对单个锚点执行完整 infoseek 流水线（含异常保护）
+
+    v1.7.2：读取 anchor['_prefer_kb']（多域交集信号）→ 透传名称搜索排序 + result 可观测。
+    """
     start_time = time.time()
+    prefer_kb = bool(anchor.get('_prefer_kb', False))
     result = {
         "anchor": anchor,
         "status": "pending",
+        "prefer_kb": prefer_kb,
         "steps": [],
         "output": None,
         "elapsed_s": 0,
@@ -1183,7 +1743,7 @@ def execute_anchor(anchor: dict, output_dir: str) -> dict:
             result["steps"].append({"step": "search_needed", "entry": name, "platform": platform})
 
             # 自动搜索 → 转URL
-            search_results = search_name_to_url(name, platform)
+            search_results = search_name_to_url(name, platform, prefer_kb=prefer_kb)
             if search_results:
                 result["steps"].append({"step": "name_search", "status": "ok",
                                          "found": len(search_results),
@@ -1222,13 +1782,31 @@ def execute_anchor(anchor: dict, output_dir: str) -> dict:
 # 入口：批量执行
 # ═══════════════════════════════════════════════════════════════
 
-def run_pipeline(anchors: list, output_dir: str = "./outputs", min_anchors: int = 0) -> dict:
+def run_pipeline(anchors: list, output_dir: str = "./outputs", min_anchors: int = 0,
+                 subject: str = None, prefer_kb: bool = None) -> dict:
     """批量执行锚点采集
 
     v1.0.0：新增覆盖率门控——anchors 数量低于 min_anchors 时直接产出
     显式失败报告（status=insufficient_coverage），不执行采集、不产出伪完整报告。
     min_anchors=0 表示不启用门控（手动 --anchors 指定场景）。
+    v1.7.2：subject/prefer_kb 贯穿全链——prefer_kb 缺省由 subject（或首锚点 name）
+    经 detect_domain 推导；解析后注入每条 anchor 供下游 execute_anchor/搜索排序消费，
+    并写入报告供可观测。
     """
+    # v1.7.2 多域交集信号解析与贯穿
+    if prefer_kb is None:
+        _subj = subject or (anchors[0].get('name', '') if anchors else '')
+        prefer_kb = False
+        if _subj:
+            try:
+                from domain_router import detect_domain
+                prefer_kb = bool(detect_domain(_subj).get('prefer_kb'))
+            except Exception:
+                prefer_kb = False
+    prefer_kb = bool(prefer_kb)
+    for _a in anchors:
+        _a.setdefault('_prefer_kb', prefer_kb)
+
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -1240,6 +1818,7 @@ def run_pipeline(anchors: list, output_dir: str = "./outputs", min_anchors: int 
             "version": "1.0.0",
             "timestamp": timestamp,
             "status": "insufficient_coverage",
+            "prefer_kb": prefer_kb,
             "coverage": {"anchors": len(anchors), "min_anchors": min_anchors},
             "stats": {"total": len(anchors), "success": 0, "failed": 0,
                       "error": 1, "total_elapsed_s": 0},
@@ -1286,6 +1865,7 @@ def run_pipeline(anchors: list, output_dir: str = "./outputs", min_anchors: int 
         "pipeline": "infoseek",
         "version": "1.0.0",
         "timestamp": timestamp,
+        "prefer_kb": prefer_kb,
         "stats": stats,
         "details": all_results,
         "feedback": feedbacks,
@@ -1310,6 +1890,12 @@ def run_pipeline(anchors: list, output_dir: str = "./outputs", min_anchors: int 
     if applied:
         log.info(f"治理反馈已自动应用: {applied} 条")
 
+    # v1.7.7 包B：实体回流（高分源实体 → 动态词典，供后续 _expand_query 复用）
+    try:
+        _reflow_entities(all_results)
+    except Exception as _e:
+        log.debug(f"[entity-reflow] 跳过: {_e}")
+
     return report
 
 
@@ -1317,14 +1903,72 @@ def run_pipeline(anchors: list, output_dir: str = "./outputs", min_anchors: int 
 # 阶段 6: 治理反馈自动应用（新增, C2）
 # ═══════════════════════════════════════════════════════════════
 
-def apply_feedback(feedbacks: list, anchor_db_path: str = "./anchor_db.json") -> int:
+def _default_anchor_db_path() -> str:
+    """锚点库默认路径（v1.7.6 G2-3）：INFOSEEK_DATA_DIR 锚定，避免相对 cwd 不稳定。"""
+    d = os.environ.get('INFOSEEK_DATA_DIR')
+    if d:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            pass
+        return os.path.join(d, 'anchor_db.json')
+    return os.path.join(os.path.expanduser('~'), '.infoseek', 'anchor_db.json')
+
+
+def _reflow_entities(details: list, min_freq: int = 2) -> int:
+    """v1.7.7 包B：从采集结果回流候选实体（防噪声：机构后缀门控 + 频次阈值）。
+
+    仅提取「中文机构后缀词」（公司/科技/集团/股份/协会/研究院/大学/实验室）
+    与英文专有名词；同会话内出现 ≥ min_freq 次才回流。返回回流条数。
+    """
+    try:
+        import sys as _s
+        from pathlib import Path as _P
+        from collections import Counter
+        _root = _P(__file__).parent.parent
+        for _p in (str(_root), str(_root / 'core')):
+            if _p not in _s.path:
+                _s.path.insert(0, _p)
+        import core.entities as _ent
+    except Exception:
+        return 0
+    cnt = Counter()
+    for r in (details or []):
+        if r.get('status') not in ('success', 'partial'):
+            continue
+        out = r.get('output') or {}
+        text = ' '.join(filter(None, [
+            out.get('title', ''), out.get('text_preview', ''),
+            (r.get('anchor') or {}).get('name', '')]))
+        for m in _re.findall(
+                r'[\u4e00-\u9fff]{2,6}(?:公司|科技|集团|股份|协会|研究院|大学|实验室)', text):
+            cnt[m] += 1
+        for m in _re.findall(r'\b[A-Z][A-Za-z0-9]{2,}\b', text):
+            cnt[m] += 1
+    n = 0
+    for name, c in cnt.items():
+        if c >= min_freq and _ent.learn_entity(
+                name, category='AUTO', confidence=min(0.9, 0.3 + c * 0.1)):
+            n += 1
+    if n:
+        log.info(f"[entity-reflow] 回流 {n} 个候选实体（≥{min_freq} 次）")
+    return n
+
+
+def apply_feedback(feedbacks: list, anchor_db_path: str = None) -> int:
     """
     将治理反馈自动应用到本地锚点库。
     若 anchor_db.json 不存在则跳过（锚点库尚未建立时静默处理）。
     返回实际更新的锚点数量。
+    v1.7.6 G2-3：默认路径锚定 INFOSEEK_DATA_DIR / ~/.infoseek；兼容回退 cwd 旧库。
     """
     if not feedbacks:
         return 0
+    if anchor_db_path is None:
+        anchor_db_path = _default_anchor_db_path()
+        # 平滑迁移：数据目录无库但 cwd 有旧库 → 沿用旧库（不丢历史）
+        if not os.path.exists(anchor_db_path) and os.path.exists('./anchor_db.json'):
+            anchor_db_path = './anchor_db.json'
     try:
         if not os.path.exists(anchor_db_path):
             # 首次运行，创建空锚点库
@@ -1380,10 +2024,17 @@ if __name__ == "__main__":
         # ── KB 补充：用可信源兜底 ──
         try:
             from trusted_kb import kb_lookup, kb_add, kb_merge, kb_fallback, _extract_domain
+            # v1.7.2 多域交集信号透传（prefer_kb → KB 源上浮）
+            _prefer_kb = False
+            try:
+                from domain_router import detect_domain
+                _prefer_kb = bool(detect_domain(args.industry).get('prefer_kb'))
+            except Exception:
+                _prefer_kb = False
             kb_hits = kb_lookup(args.industry, limit=5)
             if kb_hits:
                 log.info(f"KB补充: 命中 {len(kb_hits)} 条可信源")
-                merged = kb_merge(anchors, kb_hits)
+                merged = kb_merge(anchors, kb_hits, prefer_kb=_prefer_kb)
                 log.info(f"合并后: {len(anchors)} web + {len(kb_hits)} KB → {len(merged)} 总锚点")
                 anchors = merged
             else:
@@ -1391,14 +2042,15 @@ if __name__ == "__main__":
                 fb = kb_fallback(args.industry, limit=5)
                 if fb and len(anchors) <= 2:
                     log.warning(f"web结果稀少({len(anchors)}条)，启用KB兜底(+{len(fb)}条)")
-                    anchors = kb_merge(anchors, fb)
+                    anchors = kb_merge(anchors, fb, prefer_kb=_prefer_kb)
         except ImportError:
             log.info("trusted_kb 模块未找到，跳过KB补充")
         except Exception as e:
             log.warning(f"KB补充异常(非致命): {e}")
 
         # 执行管道（v1.0.0：industry 自动嗅探路径启用覆盖率门控 ≥3）
-        report = run_pipeline(anchors, args.output, min_anchors=3)
+        report = run_pipeline(anchors, args.output, min_anchors=3,
+                              subject=args.industry, prefer_kb=_prefer_kb)
 
         # ── 自动沉淀：采集成功的源写入KB ──
         try:
@@ -1419,7 +2071,40 @@ if __name__ == "__main__":
     if args.anchors:
         with open(args.anchors) as f:
             anchors = json.load(f)
-        run_pipeline(anchors, args.output)
+
+        # ── KB 补充：anchors 路径接线（与 --industry 同构 + 域感知扩展）──
+        try:
+            from trusted_kb import kb_lookup, kb_merge, kb_fallback, kb_enrich
+            enrich_topic = anchors[0].get("name", "") if anchors else ""
+            # v1.7.2 多域交集信号透传（prefer_kb → KB 源上浮）
+            _prefer_kb = False
+            try:
+                from domain_router import detect_domain
+                _prefer_kb = bool(detect_domain(enrich_topic).get('prefer_kb')) if enrich_topic else False
+            except Exception:
+                _prefer_kb = False
+            kb_hits = kb_lookup(enrich_topic, limit=5) if enrich_topic else []
+            if not kb_hits and enrich_topic:
+                # 域感知扩展：按 detect_domain 判定领域，种子词横向补齐
+                kb_hits = kb_enrich(enrich_topic, limit=5, prefer_kb=_prefer_kb)
+            if kb_hits:
+                log.info(f"KB补充(anchors): 命中 {len(kb_hits)} 条可信源")
+                merged = kb_merge(anchors, kb_hits, prefer_kb=_prefer_kb)
+                log.info(f"合并后: {len(anchors)} anchors + {len(kb_hits)} KB → {len(merged)} 总锚点")
+                anchors = merged
+            else:
+                # web search 无结果时的兜底
+                fb = kb_fallback(enrich_topic, limit=5) if enrich_topic else []
+                if fb and len(anchors) <= 2:
+                    log.warning(f"anchors稀少({len(anchors)}条)，启用KB兜底(+{len(fb)}条)")
+                    anchors = kb_merge(anchors, fb, prefer_kb=_prefer_kb)
+        except ImportError:
+            log.info("trusted_kb 模块未找到，跳过KB补充(anchors)")
+        except Exception as e:
+            log.warning(f"KB补充异常(anchors, 非致命): {e}")
+
+        run_pipeline(anchors, args.output, subject=enrich_topic,
+                     prefer_kb=_prefer_kb)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1456,16 +2141,230 @@ def _identity_handlers(consent: bool, max_results: int) -> dict:
     return {"Maigret": _maigret, "Sherlock": _sherlock, "manual_review": _manual}
 
 
-def _audit_identity(msg: str) -> None:
-    """审计落盘（复用 state_dir.audit_log_path）。"""
+def _audit_identity(msg: str, prefix: str = "identity_attribution") -> None:
+    """审计落盘（复用 state_dir.audit_log_path）。
+    prefix 可指定能力族（identity_attribution / account_forensics 等），C2 合规审计。"""
     try:
         _ensure_cap_paths()
         from core.state_dir import audit_log_path
         p = audit_log_path()
         with open(p, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat()} [identity_attribution] {msg}\n")
+            f.write(f"{datetime.now().isoformat()} [{prefix}] {msg}\n")
     except Exception:
         pass
+
+
+def _augment_cross_matches(accounts: list) -> list:
+    """发现层交叉命中补齐（T4/G1）：同名账号跨平台命中数是发现层天然产出，
+    但 Maigret/Sherlock client 未显式写入 cross_platform_matches 字段，
+    此处按 username 统计平台集合补齐，供三因子融合的 A 因子使用。
+    已带 cross_platform_matches 的条目保留原值；username 缺失条目不补齐。"""
+    by_user: dict = {}
+    for acc in accounts:
+        u = acc.get("username")
+        if u:
+            by_user.setdefault(u, set()).add(acc.get("platform") or acc.get("source") or "")
+    out = []
+    for acc in accounts:
+        a = dict(acc)
+        u = a.get("username")
+        if u and a.get("cross_platform_matches") is None:
+            a["cross_platform_matches"] = max(0, len(by_user.get(u, set())) - 1)
+        out.append(a)
+    return out
+
+
+def _build_identity_anchors(accounts: list, username: str, max_results: int) -> list:
+    """发现/验证结果 → 锚点条目（v1.6.0 起：附加三因子融合字段）。
+
+    - 原字段（confidence/verdict/verdict_cn/trust_score/trust_confidence）保持透传
+    - 融合模块可用 → 附加 confidence_final/confidence_label(/_cn)/fusion/
+      fusion_degradation/verdict_final；不可用/异常 → 仅原字段（降级不阻断）
+    """
+    anchors = []
+    for acc in accounts[:max_results]:
+        conf = float(acc.get("confidence") or 0)
+        anchor = {
+            "url": acc.get("url") or "",
+            "title": acc.get("platform") or acc.get("source") or "未知平台",
+            "snippet": f"{acc.get('username') or username} @ {acc.get('platform','')}"
+                       + (f" ({acc.get('fullname')})" if acc.get("fullname") else "")
+                       + (f" [验证:{acc.get('verdict_cn')}]" if acc.get("verdict_cn") else ""),
+            "score": int(conf * 100),
+            "source": acc.get("source", "Maigret"),
+            "identity_attribution": True,
+            "confidence": conf,
+            "verdict": acc.get("verdict", ""),
+            "verdict_cn": acc.get("verdict_cn", ""),
+            "trust_score": acc.get("trust_score"),
+            "trust_confidence": acc.get("trust_confidence"),
+        }
+        try:
+            from identity_confidence_fusion import fuse_anchor
+            fused = fuse_anchor(acc)
+            if fused.get("confidence_final") is not None:
+                anchor["confidence_final"] = fused["confidence_final"]
+                anchor["confidence_label"] = fused["confidence_label"]
+                anchor["confidence_label_cn"] = fused["confidence_label_cn"]
+                anchor["fusion"] = fused["fusion"]
+                anchor["fusion_degradation"] = fused["fusion_degradation"]
+                anchor["verdict_final"] = fused["verdict_final"]
+        except Exception as e:
+            log.debug(f"[身份归因] 融合附加失败（降级原输出）: {e}")
+        anchors.append(anchor)
+    return anchors
+
+
+def _account_deep_sufficient(acc: dict) -> bool:
+    """A2 信号充分性判定（单账号级，语义对齐 assess_sufficiency）：
+    成长时序可用（权重最高）→ 充足；ER+图谱组合 → 充足；否则不足。
+    pipeline 自动路径（Maigret/Sherlock 仅 username）天然不足 → 恒降级 AccountTrustScorer。"""
+    has_ts = bool(acc.get("growth_series")) or bool(acc.get("likes_series"))
+    has_graph = bool(acc.get("graph_edges")) or bool(acc.get("edges"))
+    has_er = acc.get("er") is not None or acc.get("engagement_rate") is not None
+    if has_ts:
+        return True
+    if has_graph and has_er:
+        return True
+    return False
+
+
+def _run_fake_detect(accounts_subset: list) -> dict:
+    """把带深度信号的账号子集构造 Dataset 跑 FakeDetect，返回 report。
+    异常/充分性不足 → 返回 degraded report（调用方降级 AccountTrustScorer，零替代风险）。
+    id 契约：meta index = 整数位置（与 from_raw 的 meta 对齐），likes/growth key 同；
+    edges 端点按账号位置归一化（无法解析的边忽略，不影响时序检测）。"""
+    import pandas as pd
+    _ext = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "extensions", "fake_detect")
+    if _ext not in sys.path:
+        sys.path.insert(0, _ext)
+    from fake_detect_engine import detect
+    from data_adapter import from_raw
+    pos_of = {acc.get("username") or acc.get("id") or f"acc_{i}": i
+              for i, acc in enumerate(accounts_subset)}
+    rows, likes, growth, edges = [], {}, {}, []
+    for i, acc in enumerate(accounts_subset):
+        aid = i  # 整数位置 id（与 from_raw meta index 对齐）
+        rows.append({"id": aid,
+                     "followers": acc.get("followers") or 100,
+                     "following": acc.get("following") or 100,
+                     "posts": acc.get("posts") or 50,
+                     "er": float(acc.get("er", acc.get("engagement_rate", 0.0)) or 0.0)})
+        if acc.get("likes_series"):
+            likes[aid] = np.asarray(acc["likes_series"], dtype=float)
+        if acc.get("growth_series"):
+            growth[aid] = np.asarray(acc["growth_series"], dtype=float)
+        for e in (acc.get("edges") or acc.get("graph_edges") or []):
+            try:
+                a, b = e
+                edges.append((pos_of.get(a, int(a)), pos_of.get(b, int(b))))
+            except Exception:
+                continue
+    ds = from_raw(meta_df=pd.DataFrame(rows), likes=likes, growth=growth,
+                  edges=edges if edges else None)
+    return detect(ds)
+
+
+def _verify_accounts(accounts: list) -> list:
+    """发现→验证闭环（T1/G3 + A2 信号门控）：批量人因验证，验证为增强不阻断发现。
+
+    - 注册表 AccountTrustScorer 经 enabled ∩ consent 判定（合规双闸口）
+    - A2 信号充分性分支：账号带深度信号（成长时序/互动ER/图谱）且 FakeDetect
+      双闸通过 → 深度取证（L1+L2+L3+时序）；不足 → AccountTrustScorer（零替代风险）
+    - 从发现条目构造画像（缺省信号按中性处理，绝不捏造数据）
+    - 附加 trust_score / verdict / verdict_cn / trust_confidence，不覆盖发现层 confidence
+    - 验证层未启用/异常 → 原样返回发现结果（验证是增强，不阻断发现）
+    """
+    if not accounts:
+        return accounts
+    try:
+        from core.capability_registry import is_effective_enabled
+        fd_on = is_effective_enabled("FakeDetect")
+        ats_on = is_effective_enabled("AccountTrustScorer")
+        if not (fd_on or ats_on):
+            log.debug("[身份归因] 验证层未启用/未授权，跳过验证（发现结果保留）")
+            return accounts
+        from account_trust_scorer import score_account
+        verified = []
+        fd_pending = []   # (index, acc) 深度信号充分，待 FakeDetect 批量
+        for i, acc in enumerate(accounts):
+            if acc.get("_gap"):
+                verified.append(acc)
+                continue
+            # 构造画像（跨站匹配数为发现层天然产出）
+            profile = {
+                "username": acc.get("username") or "",
+                "cross_platform_matches": acc.get("cross_platform_matches"),
+            }
+            if fd_on and _account_deep_sufficient(acc):
+                fd_pending.append((i, acc))
+                verified.append(None)  # 占位，FakeDetect 完成后统一回填
+                continue
+            r = score_account(profile)
+            acc = dict(acc)
+            acc["trust_score"] = r["trust_score"]
+            acc["verdict"] = r["verdict"]
+            acc["verdict_cn"] = r["verdict_cn"]
+            acc["trust_confidence"] = r["confidence"]
+            acc["verify_engine"] = "AccountTrustScorer"
+            verified.append(acc)
+        # A2 深度取证：批量子集一次跑引擎（充分性不足/异常 → 该子集降级 ATS）
+        if fd_pending:
+            try:
+                rep = _run_fake_detect([a for _, a in fd_pending])
+                if rep.get("degradation") == "insufficient_signals":
+                    log.info("[身份归因] FakeDetect 数据充分性不足，子集降级 AccountTrustScorer")
+                    rep = None
+            except Exception as e:
+                log.warning(f"[身份归因] FakeDetect 批量执行失败（降级 AccountTrustScorer）: {e}")
+                rep = None
+            verdicts = (rep or {}).get("verdicts", {}) if rep else {}
+            for j, (i, acc) in enumerate(fd_pending):
+                v = verdicts.get(str(j)) if rep else None   # 子集内位置 <-> Dataset id
+                if v and rep is not None:
+                    out = dict(acc)
+                    out["trust_score"] = v["trust_score"]
+                    out["verdict"] = v["verdict"]
+                    out["verdict_cn"] = v["verdict_cn"]
+                    out["trust_confidence"] = 0.85   # 深度取证置信（对抗盲区已声明）
+                    out["verify_engine"] = "FakeDetect"
+                    out["forensics"] = {
+                        "coord_clusters": rep.get("coord_clusters", []),
+                        "sync_groups": rep.get("sync_groups", []),
+                        "summary": rep.get("summary", {}),
+                        "degradation": rep.get("degradation"),
+                        "blindspots": rep.get("blindspots", []),
+                    }
+                    verified[i] = out
+                else:
+                    r = score_account({"username": acc.get("username") or "",
+                                       "cross_platform_matches": acc.get("cross_platform_matches")})
+                    out = dict(acc)
+                    out["trust_score"] = r["trust_score"]
+                    out["verdict"] = r["verdict"]
+                    out["verdict_cn"] = r["verdict_cn"]
+                    out["trust_confidence"] = r["confidence"]
+                    out["verify_engine"] = "AccountTrustScorer"
+                    verified[i] = out
+            n_fd = sum(1 for a in verified if a and a.get("verify_engine") == "FakeDetect")
+            if n_fd:
+                _audit_identity(f"FakeDetect 深度取证完成: {n_fd}/{len(fd_pending)} 账号 via {_e_verdicts(verdicts)}",
+                                prefix="account_forensics")
+        log.info(f"[身份归因] 验证层完成: {len(verified)} 个账号 "
+                 f"(AT={sum(1 for a in verified if a and a.get('verify_engine')=='AccountTrustScorer')}"
+                 f"/FD={sum(1 for a in verified if a and a.get('verify_engine')=='FakeDetect')})")
+        return verified
+    except Exception as e:
+        log.warning(f"[身份归因] 验证层跳过（异常）: {e}")
+        return accounts
+
+
+def _e_verdicts(verdicts: dict) -> str:
+    """审计摘要：verdict 分布（bot/suspicious 计数）"""
+    from collections import Counter
+    c = Counter(v.get("verdict") for v in (verdicts or {}).values())
+    return ", ".join(f"{k}={v}" for k, v in c.items() if v)
 
 
 def search_identity_attribution(username: str, consent: bool = False,
@@ -1502,18 +2401,16 @@ def search_identity_attribution(username: str, consent: bool = False,
         log.warning(f"[身份归因] 能力链耗尽，标记需人工核实: {username}")
         return []
 
-    anchors = []
-    for acc in accounts[:max_results]:
-        conf = float(acc.get("confidence") or 0)
-        anchors.append({
-            "url": acc.get("url") or "",
-            "title": acc.get("platform") or acc.get("source") or "未知平台",
-            "snippet": f"{acc.get('username') or username} @ {acc.get('platform','')}"
-                       + (f" ({acc.get('fullname')})" if acc.get("fullname") else ""),
-            "score": int(conf * 100),
-            "source": acc.get("source", "Maigret"),
-            "identity_attribution": True,
-            "confidence": conf,
-        })
+    # T1/G3：发现→验证闭环（AccountTrustScorer 批量人因评分，验证为增强不阻断）
+    accounts = _verify_accounts(accounts)
+
+    # T4/G1：发现层交叉命中补齐（同名跨平台数，供三因子融合 A 因子）
+    try:
+        accounts = _augment_cross_matches(accounts)
+    except Exception:
+        log.debug("[身份归因] cross 补齐跳过（不影响主链）")
+
+    # T4：三因子置信度融合锚点构建（新增字段，不覆盖原字段；异常降级原输出）
+    anchors = _build_identity_anchors(accounts, username, max_results)
     log.info(f"[身份归因] '{username}' → {len(anchors)} 个账号锚点（via {res.used}）")
     return anchors
