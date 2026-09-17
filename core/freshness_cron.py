@@ -8,6 +8,7 @@ core/freshness_cron.py — Infoseek 新鲜度 cron（v2.1.1 新增，v2.4.0 扩�
 3. alias 生命周期扫描（v2.2.1）
 4. v2.4.0 新增：实体画像 stale 标注（90 天未出现自动 stale_profile=True）
 5. v2.4.0 新增：claim_store TTL 清理（180+ 天声明 decay）
+6. v2.0.0 收尾：learned 层冷/噪声实体清理（entities_learned.json，默认 dry_run 统计）
 
 CLI:
   python -m core.freshness_cron full-scan
@@ -58,8 +59,10 @@ class FreshnessCron:
                 wikidata_available = True
             except Exception as e:
                 wikidata_available = False
-        # 注(v1.2.x 审计修复)：实体库为进程内静态列表（entities.py 无持久层），
-        # 不再对 last_verified_at 做"看起来落盘"的无效更新；验证结果以统计字段返回。
+        # 实体持久层现状（v2.0.0 校正，取代 v1.2.x 旧注释）：entities.py 已有双层
+        # 持久层——learn_entity → entities_learned.json（动态回流），EntityTracker →
+        # entities_state.json（hit/last_seen/衰减，跨进程）。静态词典仍不被改写，
+        # 故 last_verified_at 验证结果以统计字段返回；冷条目清理见下方第 7 步。
 
         # 4) v2.2.1: alias 生命周期扫描（自动清理 stale alias）
         alias_stats = {'active': 0, 'downgraded': 0, 'stale': 0, 'cleaned': 0}
@@ -122,6 +125,25 @@ class FreshnessCron:
         except Exception:
             pass
 
+        # 7) v2.0.0: learned 层冷/噪声实体清理（实体持久层生命周期收尾）
+        # 默认 dry_run 只统计候选不删除（安全）；env INFOSEEK_LEARNED_PRUNE_APPLY=1
+        # 才真正原子落盘。近期仍命中（出现在 stale 列表之外）的冷条目受保护。
+        learned_prune_stats = {'candidates': 0, 'pruned': 0, 'remaining': 0, 'dry_run': True}
+        try:
+            from entities import prune_learned_entities
+            # dry_run 仅统计候选：active_names 传空（不删除，保护集合不影响候选统计）
+            _pr = prune_learned_entities(
+                max_age_days=180, min_confidence=0.3,
+                active_names=set(), dry_run=True)
+            learned_prune_stats = {
+                'candidates': len(_pr.get('candidates', [])),
+                'pruned': _pr.get('pruned', 0),
+                'remaining': _pr.get('remaining', 0),
+                'dry_run': _pr.get('dry_run', True),
+            }
+        except Exception:
+            pass
+
         return {
             'decayed_count': decay_stats.get('decayed_count', 0),
             'total_reduction': decay_stats.get('total_reduction', 0),
@@ -138,6 +160,9 @@ class FreshnessCron:
             'profile_marked_stale': profile_stats['marked_stale'],
             'profile_kept_active': profile_stats['kept_active'],
             'claim_decay': claim_decay_stats,
+            # v2.0.0 learned 层冷清理统计（默认 dry_run）
+            'learned_prune_candidates': learned_prune_stats['candidates'],
+            'learned_pruned': learned_prune_stats['pruned'],
             'scan_time': 'cron',
         }
 
