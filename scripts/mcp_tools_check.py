@@ -26,6 +26,7 @@ COMMON_SYMBOLS = {
     'INFOSEEK_ROOT', 'ensure_dirs', 'ARCHIVES_DIR', 'INFOSEEK_DIR',
     'DB_PATH', 'LOG_PATH', 'AUTH_TOKEN', 'mask_token', 'WORKSPACE',
     'SERVER_VERSION', 'TOOL_CALL_COUNTER', 'AUDIT_LOG_PATH', 'CORE_DIR',
+    'SKILL_VERSION',  # v1.8.1 版本单源真源（对外唯一版本）
 }
 BUILTINS = set(dir(builtins)) | {'__file__', '__name__', '__doc__', '__package__'}
 
