@@ -28,6 +28,10 @@
 | `INFOSEEK_RECALL_DIVERSITY` | `1` | 召回增强：跨引擎多样性合并（轮询逐引擎取结果，防单源垄断 top-N；v1.2.x） |
 | `INFOSEEK_RECALL_ADAPTIVE` | `1` | 召回增强：相关性门槛自适应（候选 <6→门槛10 保召回；>20→门槛14 滤噪；v1.2.x） |
 | `INFOSEEK_RECALL_DYN_WEIGHT` | `0` | 召回增强：动态层权重（按 query 类型 finance/tech/sentiment 调整引擎权重；opt-in，v1.2.x） |
+| `INFOSEEK_ENGINE_WHITELIST` | 空 | 引擎白名单路由（策略②，2026-09-10）：逗号分隔引擎名，运行时优先于 engine-routes.json；空则用配置文件 whitelist 兜底；六键控引擎无 key 自动剔除 |
+| `INFOSEEK_ENGINE_PROBE` | `0` | `1`=开启可用性探测：白名单引擎经 probe_http 实测，不可达引擎被剔除后再进入搜索池 |
+| `INFOSEEK_PROBE_TIMEOUT` | `5` | 探测超时秒数（engine_router.probe_http） |
+| `INFOSEEK_PROBE_TTL` | `600` | 探测结果缓存 TTL 秒数（`~/.infoseek/engine_routes.json`） |
 
 ### 抓取层级 extraction_level（v1.2.x L3/L4）
 
