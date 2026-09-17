@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""infoseek_archive_server.py — Infoseek v1.6.0 写操作 server
+"""infoseek_archive_server.py — Infoseek 写操作 server（版本随 SKILL_VERSION 单源）
 与 infoseek_mcp_server.py (search server) 拆分，实现最小权限原则
 
 工具:
@@ -39,12 +39,13 @@ ARCHIVE_TOOLS = [t for t in TOOLS if t['name'] in ('save_archive', 'dedup_stats'
 TOOLS.clear()
 TOOLS.extend(ARCHIVE_TOOLS)
 
-SERVER_VERSION = "1.7.0"
+# v1.8.1 版本单源化：移除本地 SERVER_VERSION = "1.7.0" 覆盖（曾致对外版本倒挂）；
+# 沿用 mcp_tools_common.SKILL_VERSION（经 infoseek_mcp_server import 转手）。
 SERVER_NAME = "infoseek-archive"
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Infoseek Archive Server v1.6.0 (写操作)')
+    parser = argparse.ArgumentParser(description=f'Infoseek Archive Server v{SERVER_VERSION} (写操作)')
     parser.add_argument('--transport', default='stdio', choices=['stdio', 'sse'])
     parser.add_argument('--port', type=int, default=8081, help='SSE 端口（默认 8081，与 search 错开）')
     parser.add_argument('--require-token', action='store_true')
