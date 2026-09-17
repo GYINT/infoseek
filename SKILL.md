@@ -1,7 +1,7 @@
 ---
 name: infoseek
-version: 1.4.1
-description: 端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级：静态/渲染/凭证/多媒体）、搜索引擎全生命周期管理（健康/配额/新鲜度自愈）、QVeris 能力路由、统一能力注册表（consent 闸控）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并）、召回增强（别名扩展/多样性合并/自适应门槛）、跨源融合分析，最终输出结构化 Markdown 报告，可选自动归档。适用：行业调研、趋势分析、竞品分析、市场研究、技术研究、内容采集、报告生成、长期知识库建设。不适用：实时新闻监控、学术文献综述、浏览器自动化爬取、即时聊天对话
+version: 2.0.0
+description: 端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级：静态/渲染/凭证/多媒体）、搜索引擎全生命周期管理（健康/配额/新鲜度自愈）、QVeris 能力路由、统一能力注册表（consent 闸控）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并+人名消歧动态注册）、召回增强（别名扩展/多样性合并/自适应门槛/跨语言别名桥接）、跨源融合分析，最终输出结构化 Markdown 报告，可选自动归档。适用：行业调研、趋势分析、竞品分析、市场研究、技术研究、内容采集、报告生成、长期知识库建设。不适用：实时新闻监控、学术文献综述、浏览器自动化爬取、即时聊天对话
 license: MIT
 ---
 
@@ -68,13 +68,16 @@ async for partial in streaming_research("DeepSeek V3", lite=True):
     print(partial["step"], "...")  # score_complete / wikidata_complete / ...
 ```
 
-### 2.2 MCP 工具调用（15 规范工具 + 12 兼容并存）
+### 2.2 MCP 工具调用（17 规范工具 + 12 兼容并存）
 
 | 类别 | 工具数 | 用途 |
 |------|--------|------|
 | **研究核心** | 2 | `research_v3` / `research_stream` |
 | **异步工具** | 11 | `search_anchors_async` / `fetch_content_async` / `save_archive_async` / `check_dedup_async` / `dedup_stats_async` / `fuse_analysis_async` / `cross_subject_analysis_async` / `summarize_content_async` / `conflict_detection_async` / `score_source_async` / `score_contradiction_async` |
 | **Key 管理** | 2 | `manage_keys`（list/stat/rotate/revoke，脱敏）/ `key_usage`（用量/成本报表） |
+| **跨 skill 协同** | 1 | `qcm_query`（反向调 QCM 4 形态） |
+| **身份归因** | 1 | `identity_attribution`（用户名→跨平台锚点+人因验证；需 env+consent 双闸，未授权显式报错） |
+| **账号取证** | 1 | `account_forensics`（显式投喂账号数据集→四层深度取证：L1统计/L2图结构/时序同步/L3ML；`INFOSEEK_ENABLE_FAKE_DETECT`+consent 双闸，充分性不足→降级 AccountTrustScorer） |
 | **兼容并存期** | 12 | 11 个同步工具 + `research`（仍响应，附 `deprecated: true` + `migrate_to`） |
 | **REST 桥** | — | `POST /tools/<tool_name>`（Bearer 鉴权，供 Coze/Dify 等 OpenAPI 生态） |
 
@@ -176,13 +179,15 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 | 能力 | 模块 | 简述 |
 |------|------|------|
 | `search_web` 降级链 | `scripts/infoseek_pipeline.py` | 多引擎并行 + 层间降级 + 动态保留池；query 别名扩展 / 多样性轮询 / 自适应相关性门槛 |
+| 分词唯一真源 | `scripts/text_tokenizer.py` | `tokenize_text()`：jieba 优先（探测缓存）→ 纯 Python 回退（中文 ≤4 整段 / >4 2-gram，英数 ≥2 整词）；`require_chinese` 中文硬门槛门控。`_tokenize_subject` / `_tokenize_query` 均为其薄封装（v1.8.4 GA5 单源化） |
 | 引擎生命周期 | `scripts/engine_lifecycle.py` | 健康状态机 / 配额追踪 / 认证粘滞 / 新鲜度自愈（配额重置、冷却恢复、API 漂移检测）+ CLI engine-status/reconcile/probe/reset |
 | QVeris 能力路由 | `scripts/qveris_client.py` | 结构化金融/数据能力：discover→inspect→call 全流程，双端点自动选区（sk-cn-→qveris.cn 合规区），429/401 自动进入引擎生命周期 |
-| 4 级抓取 | `scripts/mcp_tools_search.py` | `extraction_level` 1/2/3/4 路由：静态 / playwright 渲染 / KeyManager 凭证注入（仅内存）/ 多媒体 chunk |
+| 4 级抓取 | `scripts/mcp_tools_search.py` | `extraction_level` 1/2/3/4 路由：静态 / L2 多引擎渲染（Camoufox→Obscura→Patchright→Chromium）/ KeyManager 凭证注入（仅内存）/ 多媒体 chunk |
 | public-apis 免费目录 | `scripts/public_apis_catalog.py` | L0 免费优先层：README→本地 JSON 索引（1712 条/51 分类/799 无 key），关键词/分类/认证检索，离线内嵌集兜底 |
 | 三级路由 | `scripts/tiered_router.py` | 意图识别→L0 免费→L1 网关→L2 专用→人工核实；免费优先、credits 预算保护 |
 | 账号人因验证 | `scripts/account_trust_scorer.py` | L2 真人验证：成熟度/粉丝/行为/内容四维评分→real/bot/suspicious/unknown，纯规则零依赖（consent 闸控） |
 | AgentKey 网关适配 | `ecosystem/adapters/agentkey.py` | L1 网关付费层：MCP find_tools→describe_tool→execute_tool 骨架（金融子集优先，社交默认 OFF），mcp 缺失优雅降级 |
+| L2 多引擎渲染 | `scripts/l2_renderer.py` | browser_engine 能力族：Camoufox 主(反指纹) + Obscura 批(30MB轻量) + Patchright 备 + Chromium 兜底；场景路由 + 健康状态机 + 故障 cross-over；引擎缺失自动跳过降级 L1 |
 
 ### 4.6 输出导出
 
@@ -190,16 +195,19 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 |------|------|------|
 | `build_traced` / `to_dot` / `to_markdown` | `core/traced_export.py` | 引用图谱导出（Graphviz / Markdown） |
 
-### 4.7 MCP 工具（15 规范 + 12 兼容并存）
+### 4.7 MCP 工具（17 规范 + 12 兼容并存）
 
 | 类别 | 工具 | 用途 |
 |------|------|------|
 | **研究核心（2）** | `research_v3` / `research_stream` | 异步研究 / 流式研究 |
 | **异步工具（11）** | `search_anchors_async` / `fetch_content_async` / `save_archive_async` / `check_dedup_async` / `dedup_stats_async` / `fuse_analysis_async` / `cross_subject_analysis_async` / `summarize_content_async` / `conflict_detection_async` / `score_source_async` / `score_contradiction_async` | 异步包装（规范接口） |
 | **Key 管理（2）** | `manage_keys` / `key_usage` | Key 生命周期（list/stat/rotate/revoke，脱敏）/ 用量成本报表 |
+| **跨 skill 协同（1）** | `qcm_query` | 反向调 QCM 4 形态输出 |
+| **身份归因（1）** | `identity_attribution` | 用户名→跨平台锚点+人因验证（合规双闸：env + consent） |
+| **账号取证（1）** | `account_forensics` | 显式投喂数据集→深度取证 Report（与 identity_attribution 构成「发现→取证」双子工具） |
 | **兼容并存期（12）** | 11 个同步工具 + `research` | 仍响应，附 `deprecated: true` + `migrate_to` |
 
-> 新集成请使用 **15 个规范工具**（研究核心 + 异步 + Key 管理）；同步工具仅用于老客户端兼容。
+> 新集成请使用 **18 个规范工具**（研究核心 + 异步 + Key 管理 + 跨 skill 协同 + 身份归因 + 账号取证）；同步工具仅用于老客户端兼容。
 
 ---
 
@@ -207,12 +215,25 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 
 ### 5.1 评分门控
 
+> **唯一评分口径 = v2 四维**（`core/anchor_score_v2.compute_final_score_v2` / `compute_base_score_v2`）。
+> v1.2 `activity` 旧口径（`compute_anchor_score` 四轴加权 + 双层复活）已于 **v1.7.8 删除**；
+> `anchor_adapter.calculate_score()` 仅为兼容 shim，内部转调 v2（同输入同输出，
+> 见 `tests/test_score_consistency_v178.py`）。
+>
+> **唯一聚合真源（v1.8.3）= `core/anchor_score_v2.aggregate_score_v2`** —— 复活 → 衰减 →
+> 跨平台 → 语义 → 信任 → 领域 → 分类七环节单点实现。两个评分入口**同源委托**，禁止自算公式：
+> 链A `compute_final_score_v2`（四维完整口径）、链B `infoseek_core_v2.score_source`
+> （MCP 工具 `score_source`，兼容 v1 输入与真实搜索源的 base 三态入口，由 `base_origin` 标注）。
+> `tier` 单源委托 `trust_sources.get_tier_level`（恒 1-4）；分类阈值 / 复活门禁用常量单源。
+> 口径事实：简化复活 `base≥90 → 保底 70` 经实测**恒为数值 no-op**（仅 `whitelist_triggered`
+> 标志位有效）。守护见 `tests/test_three_chain_v183.py`（63 check）。
+
 ```
-Anchor_Score = 互动深度×20% + 主题一致性×30% + 来源可信度×40% + LLM 上下文可读性×10%
+Anchor_Score = 互动深度(interaction)×20% + 主题一致性(topic_match)×30% + 来源可信度(credibility)×40% + LLM 上下文可读性(llm_readability)×10%
 门控：≥70 → 🥇 核心自动采集 | 40-69 → 🥈 需确认 | <40 → 🥉 过滤
 ```
 
-详见 `references/Infoseek_Anchor_Score五维契约_v1.5.md`
+详见 `references/Infoseek_Anchor_Score评分契约_v2.md`（四维 base + 加权层；历史 v1.5「五维」命名已勘误）
 
 ### 5.2 矛盾检测语义
 
@@ -254,7 +275,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 ## 6. 兼容性
 
 - **0 破坏性变更**：历史 API 完整保留，同步 `research()` 兼容并存
-- **MCP 工具**：15 规范工具 + 12 兼容并存期工具（附 `deprecated` 标记）
+- **MCP 工具**：17 规范工具 + 12 兼容并存期工具（附 `deprecated` 标记）
 - **运行时数据**：状态文件（claims/aliases/engine_state 等）落 `~/.infoseek/`（`INFOSEEK_DATA_DIR` 可覆盖），技能更新不丢数据
 - **升级方式**：备份 → 替换目录 → 运行 `python tests/run_tests.py` 验证
 
@@ -262,7 +283,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 
 ## 7. 路线图
 
-详见 `references/ROADMAP.md`（历史脉络 · 待办 · 前景方向）。
+详见 `references/ROADMAP.md`（当前基线 · 待办 · 前景方向）；v1.0.0→v2.0.0 历次实施细节见 `references/ROADMAP_archive_20260917.md`。
 
 **概要**：
 - **近期**：perf 多轮基准、实体持久层、L3 真实凭证冒烟
@@ -307,7 +328,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 
 | 契约 | 用途 |
 |------|------|
-| `references/Infoseek_Anchor_Score五维契约_v1.5.md` | 评分公式 + 门控规则 |
+| `references/Infoseek_Anchor_Score评分契约_v2.md` | 评分公式（四维 base）+ 门控规则 |
 | `references/Infoseek_MCP集成契约_v1.5.md` | MCP 协议 + 工具 schema |
 | `references/Infoseek_维度命名契约_Naming_Convention.md` | 人物 6 维分桶 |
 | `references/Infoseek_存档归档契约_Archive_Convention.md` | 归档目录结构 + 命名格式 |
@@ -319,7 +340,8 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 | `references/qcm-coop-contract.md` | QCM 跨 skill 协同契约 |
 | `references/external-deps.md` | 外部依赖清单 + 作用 + 降级路径 |
 | `references/api-keys.md` | 外部 API Key 清单 + 效益 + 获取 |
-| `references/ROADMAP.md` | 历史脉络 · 待办 · 前景方向 |
+| `references/ROADMAP.md` | 当前基线 · 待办 · 前景方向（纯净版） |
+| `references/ROADMAP_archive_20260917.md` | v1.0.0→v2.0.0 历史实施记录归档 |
 | `references/trusted-sources.json` | 5 领域 × tier1-4 信任源白名单 |
 
 ---
