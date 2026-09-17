@@ -80,10 +80,11 @@ def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]
     claims = []
     seen = set()
     for src in sources:
-        text = ' '.join([
-            src.get('text', '') or src.get('snippet', '') or src.get('title', ''),
-            src.get('title', ''),
-        ])
+        # P3 claim 质量（2026-09-10）：正文优先，标题不再拼接——
+        # 标题词不必然出现在正文，拼接会把「标题词汇」误提为事实 claim；
+        # 仅正文/snippet 全缺时以标题兜底（弱声明，宁缺毋弱）。
+        body = src.get('text', '') or src.get('snippet', '') or ''
+        text = body if body else src.get('title', '')
         if not text.strip():
             continue
         entities = extract_entities(text)
@@ -290,6 +291,13 @@ class ConflictMonitor:
         # v2.4.0: 跨会话历史比对
         session_sources = set(c['source'] for c in self.session_claims)
         self._augment_cross_session(conflicts, session_sources)
+
+        # v2.5.0: 多源可信度加权（P1-2 G2，weighted/max_cred/sources_cred 增补）
+        try:
+            from conflict_weight import weight_conflicts
+            weight_conflicts(conflicts)
+        except Exception:  # noqa: BLE001 加权失败不影响冲突检测主流程
+            pass
 
         result = {
             'conflicts': conflicts,
