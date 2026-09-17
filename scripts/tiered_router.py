@@ -159,8 +159,12 @@ def _search_qveris(query: str, limit: int = 3) -> List[Dict]:
 
 
 def route_query(query: str, intent: Optional[str] = None,
-                budget: int = 0, verbose: bool = False) -> Dict:
+                budget: int = 0, verbose: bool = False,
+                consent: bool = False) -> Dict:
     """三级路由执行：L0 → L1 → L2 顺序尝试，命中即返回；全挂 → manual_review。
+
+    consent: 身份归因（identity 意图）合规授权透传；未授权时身份链标记
+             skipped-no-consent 并降级 manual_review（不静默执行个人 OSINT）。
 
     返回:
         {query, intent, used, layer, results, trail: [(cap, status)], exhausted}
@@ -201,9 +205,40 @@ def route_query(query: str, intent: Optional[str] = None,
                         "exhausted": False}
             continue
 
-        # 身份归因链（Maigret/Sherlock/AccountTrustScorer）：由独立路径处理
-        if cap in ("Maigret", "Sherlock", "AccountTrustScorer"):
-            trail.append((cap, "skipped-identity-path"))
+        # 身份归因链（Maigret/Sherlock/AccountTrustScorer）：统一入口
+        # T3/G1：由 pipeline.search_identity_attribution 一体化执行
+        #   （内部：registry 双闸口 → compensate(Maigret→Sherlock→manual) → AccountTrustScorer 验证）
+        if cap == "Maigret":
+            if not os.environ.get("INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION"):
+                trail.append(("Maigret", "skipped-disabled"))
+                trail.append(("Sherlock", "skipped-disabled"))
+                trail.append(("AccountTrustScorer", "skipped-disabled"))
+                continue
+            if not consent:
+                trail.append(("Maigret", "skipped-no-consent"))
+                trail.append(("Sherlock", "skipped-no-consent"))
+                trail.append(("AccountTrustScorer", "skipped-no-consent"))
+                continue
+            try:
+                sys.path.insert(0, str(Path(__file__).parent))
+                from infoseek_pipeline import search_identity_attribution
+                r = search_identity_attribution(query, consent=True, max_results=budget or 10)
+                trail.append(("Maigret", "ok" if r else "empty"))
+                trail.append(("Sherlock", "via-unified-path"))
+                trail.append(("AccountTrustScorer", "via-unified-path"))
+                if r:
+                    return {"query": query, "intent": intent,
+                            "used": "identity_attribution", "layer": "L2-身份",
+                            "results": r, "trail": trail, "exhausted": False}
+            except Exception as e:
+                trail.append(("Maigret", f"fail:{type(e).__name__}"))
+                trail.append(("Sherlock", "via-unified-path"))
+                trail.append(("AccountTrustScorer", "via-unified-path"))
+            # 统一入口已尝试（无论成败），身份链不逐点重试，落末端 manual_review
+            continue
+        if cap in ("Sherlock", "AccountTrustScorer"):
+            trail.append((cap, "via-unified-path"))
+            continue
 
     # 末端：manual_review（不静默丢数据）
     trail.append(("manual_review", "gap"))
@@ -225,12 +260,14 @@ def main() -> int:
     ap.add_argument("--intent", choices=list(_INTENT_CHAINS.keys()), help="显式意图")
     ap.add_argument("--plan", action="store_true", help="仅输出路由计划（不执行）")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--consent", action="store_true",
+                    help="identity 意图合规授权（涉个人 OSINT，须显式开启）")
     args = ap.parse_args()
 
     if args.plan:
         print(json.dumps(resolve_route(args.query, args.intent), ensure_ascii=False, indent=2))
         return 0
-    r = route_query(args.query, args.intent, verbose=args.verbose)
+    r = route_query(args.query, args.intent, verbose=args.verbose, consent=args.consent)
     print(json.dumps(r, ensure_ascii=False, indent=2))
     return 0
 
