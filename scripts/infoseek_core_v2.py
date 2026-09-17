@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-scripts/infoseek_core_v2.py — Infoseek v2 统一 API 入口（v2.0.0 新增）
+scripts/infoseek_core_v2.py — Infoseek v2 统一 API 入口（mod-v2.0.0 新增）
+
+版本维度声明（v1.8.1 治理）：本文件返回体的 'version' 字段（'1.2.0' / '1.0.0'）是
+「算法/结果体版本 algo-v」，标识评分算法与结果 schema 的演进，**不是** skill 对外版本
+（见 scripts/mcp_tools_common.py:SKILL_VERSION）。下游消费方按 algo-v 读取，字段名与值
+保持稳定，不随 skill 版本变动；注释中的 v3.0.0 指流式 yield 协议版本（proto-v），同为独立维度。
 
 设计目标：
 1. 把 core/ 各模块统一封装为 v2 API
@@ -36,11 +41,43 @@ from core.ner import extract_entities
 from core.entities import get_entities_by_type, entity_count
 from core.trust_sources import compute_trust_bonus, get_tier_level
 from core.llm_router import llm_call, estimate_cost, list_available_providers
+# v1.8.3 §8.4：聚合真源**顶层导入**（用顶层模块名 anchor_score_v2 而非 core.anchor_score_v2，
+# 与 anchor_adapter / 守护测试指向同一模块对象，规避「双模块陷阱」导致的状态分裂；
+# CORE_DIR 已于上方插入 sys.path）。放顶层另修性能：函数内局部 import 每次调用都触发
+# sys.path.insert → 1000 源评分时 sys.path 膨胀至 3000+ 条，find_spec 呈 O(n) 遍历。
+from anchor_score_v2 import aggregate_score_v2
+# v1.9.0 GA9/GA10：人名消歧 + 跨语言别名桥接真源（core/ 下模块）。
+# 顶层模块名导入（与 anchor_score_v2 同理，规避 core./顶层双模块状态分裂）；
+# ⚠️ 必须模块对象方式引用（晚绑定），禁 from-import —— §8.13.3 铁律，
+# 守护见 tests/test_ga9_person_v190.py / test_ga10_xling_v190.py。
+import person_ner as _person_mod
+import xling_bridge as _xling_mod
 
 
 # ═══════════════════════════════════════════════════════════════
 # v2 核心 API
 # ═══════════════════════════════════════════════════════════════
+
+_PATHS_READY = False
+
+
+def _ensure_paths() -> None:
+    """幂等确保 scripts/ 与 core/ 在 sys.path（v1.8.3 性能修复）。
+
+    根因：`score_source` 每次调用都执行 `sys.path.insert(0, ...)`，实测 300 源评分后
+    sys.path 由 9 条膨胀到 910 条 → import 机制 `find_spec` 被调 687,871 次 / 12.15s
+    （占 score_source 总耗时 89%）、`_path_join` 343 万次，整体呈 O(n²) 退化
+    （perf S1 4.8s→12.6s / S2 58.8s→154.7s / S4 90.0s→227.2s）。
+    幂等后 sys.path 恒定，1000 源级联恢复 O(n)。
+    """
+    global _PATHS_READY
+    if _PATHS_READY:
+        return
+    for _p in (str(INFOSEEK_ROOT / 'scripts'), str(CORE_DIR)):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+    _PATHS_READY = True
+
 
 def _has_llm_endpoint() -> bool:
     """v2.4.3 PATCH (P1-B): 检测当前环境是否配置 LLM endpoint
@@ -56,31 +93,86 @@ def _has_llm_endpoint() -> bool:
         return False
 
 
-def score_source(source: Dict, subject: str, with_domain: bool = True) -> Dict:
-    """v2 评分（封装 anchor_adapter v1 + 统一信任源加权）
+def _bootstrap_persons(subject: str) -> None:
+    """v1.9.0 GA9④：人名实体引导（闭合 D2「NER 词典不含人名」）。
+
+    subject 人名检测 → 拼音别名生成 → 动态注册 person 实体族（运行时会话级，
+    幂等零文件写入）。注册后 extract_entities / 冲突检测 / 实体图谱可按人名索引
+    源文本（含拉丁拼写经注册别名词典命中，如 'Linjian Xiang' → 项林坚）。
+    失败静默——不阻断主链路；env 闸 INFOSEEK_PERSON_NER（默认开，person_ner 内判）。
+    """
+    try:
+        _person_mod.bootstrap_subject(subject or '')
+    except Exception:
+        pass
+
+
+def score_source(source: Dict, subject: str, with_domain: bool = True,
+                 prefer_kb: bool = None, days_since_published: int = None,
+                 domain_profile: dict = None) -> Dict:
+    """v2 评分（兼容入口 / 编排层）；v1.8.3 起聚合环节委托 `aggregate_score_v2`
+
+    **职责边界（§8.4 三链路口径一致性）**
+      链B（本函数）  = base 取值 + 领域探测 + 信任/KB 加权取值 → 聚合**委托**链A 真源
+      链A（`core.anchor_score_v2.compute_final_score_v2`）= 唯一完整评分口径（四维 base）
+    两链共用 `aggregate_score_v2` → 复活标志 / 时间衰减 / 分类阈值 / 100 分封顶口径恒等。
+    历史分叉（v1.8.3 前）：本函数自算 `min(base + trust_bonus, 100)`，缺复活标志、
+    **缺时间衰减环节**、分类阈值各自硬编码 → 实测 400 天陈旧源链A 38.7(❌噪声) vs
+    链B 70.7(🟢核心)，属分类翻转级分叉；现已闭合。
+
+    **base 三态入口**（v1.0.1 P0-1 兜底设计，保留；由 `base_origin` 显式可观测）
+      `four_dim`          含 interaction/topic_match/credibility → 走链A calculate_score
+      `v1_score`          仅含 score（v1 输入）→ 直接采用
+      `semantic_fallback` 三者皆缺但有文本 → max(jaccard, containment×0.8) 兜底
+      `empty`             全空 → 0
+    注：链B base 与链A 四维 base 是**有意的入口差异**（链B 需兼容 v1 输入与真实搜索源），
+    非口径分叉；分叉的定义是「同一 base 经不同聚合公式得不同 final」，该分叉已消除。
 
     参数:
         source: {url, platform, score, title, snippet, ...}
         subject: 调研主题
         with_domain: 是否自动应用领域加权
+        prefer_kb: 多域交集场景（None → 由 detect_domain 自动判定）
+        days_since_published: 发布距今天数（v1.8.3 新增，补齐时间衰减）。
+            None（默认）→ 读 source['days_since_published']，缺省 0（抓取层当前不注入
+            该字段 → 默认行为与 v1.8.2 完全一致，零回归）。
+        domain_profile: 领域 profile（v1.8.3 新增）。显式传入时 `kb_intersect_bonus`
+            走双参口径（profile 的 intersect_boost 声明生效）；默认 None → 单参默认基准，
+            与 v1.7.2 既有契约（prefer_kb 多 KB +12）数值兼容。
 
     返回:
         {
-            'final_score': 0-100,
-            'tier': 1-4,
-            'trust_bonus': 0-30,
-            'domain_bonus': 0-20,
+            'final_score': 0-100,        # 聚合真源产出
+            'base_score': 0-100,
+            'base_origin': str,          # base 来源（v1.8.3 新增，可观测）
+            'tier': 1-4,                 # trust_sources.get_tier_level 唯一真源
+            'trust_bonus': 0-42,         # = trust_bonus_base + kb_bonus（字段归属沿用 v1.7.2 契约）
+            'trust_bonus_base': 0-30,    # 纯信任源加权（v1.8.3 拆分，与链A trust_bonus 同口径）
+            'kb_bonus': 0-12,            # KB 交集加权（v1.8.3 拆分，与链A domain_bonus 内 KB 段同源）
+            'domain_bonus': 0-20,        # 领域加权（**仅报告不计入 final**，见下方口径声明）
+            'xling_bridge': 0-70,        # 跨语言别名桥接分（v1.9.0 GA10 新增，向后兼容；仅 semantic_fallback 路径非零）
+            'after_decay': float,        # 衰减后中间量（v1.8.3 新增，对齐链A）
+            'decay_factor': float,       # 衰减因子（v1.8.3 新增）
+            'whitelist_triggered': bool, # 复活标志（v1.8.3 新增，对齐链A）
             'classification': '🟢核心' / '🟡潜力' / '❌噪声',
-            'version': '1.2.0',
+            'version': '1.2.0',          # algo-v：下游契约稳定，不随 skill 版本变动
         }
-    """
-    # 0) 如果 source 已含 score 字段（v1 输入），直接使用为 base_score
-    base_score = source.get('score', 0)
 
-    # 1) 调用 v1 anchor_adapter.calculate_score()（如果有完整字段）
+    **domain_bonus 口径声明**：链B 的信任源与 KB 交集加分已全部经 `trust_bonus` 进入
+    聚合，故 `domain_bonus` 字段（来自 `source['_scoring']` 旁路）**不再重复计入 final**，
+    避免双重计分；链A 的 domain_bonus 计入 final（其 trust_bonus 不含 KB 段）。
+    两侧 KB 加分**数值同源**（均出自 `domain_router.kb_intersect_bonus`），仅字段归属不同。
+    """
+    # 0) base 三态入口（base_origin 可观测）
+    base_score = source.get('score', 0)
+    base_origin = 'v1_score' if base_score else 'empty'
+    xling_bridge_score = 0  # v1.9.0 GA10：跨语言桥接分（仅 semantic_fallback 路径产生）
+
+    # 1) 完整四维字段 → 走链A calculate_score（v2 口径）
     if all(k in source for k in ('interaction', 'topic_match', 'credibility')):
+        base_origin = 'four_dim'
         try:
-            sys.path.insert(0, str(INFOSEEK_ROOT / 'scripts'))
+            _ensure_paths()
             from anchor_adapter import calculate_score
             v1_result = calculate_score(
                 source, subject,
@@ -104,53 +196,111 @@ def score_source(source: Dict, subject: str, with_domain: bool = True) -> Dict:
                 source.get('title', ''), source.get('snippet', ''), source.get('text', '')
             ]))
             if text:
-                sys.path.insert(0, str(INFOSEEK_ROOT / 'scripts'))
+                _ensure_paths()
                 from anchor_adapter import compute_semantic_similarity, _string_containment_similarity
                 jaccard = compute_semantic_similarity(text, subject)
                 containment = _string_containment_similarity(text, subject)
                 base_score = max(jaccard, int(containment * 0.8))
+                # v1.9.0 GA10：跨语言别名桥接 —— 中文主题 × 拉丁文正文相似度趋零时，
+                # subject 人名拼音别名 / 词典实体拉丁别名词边界命中 → 保底 55（🟡潜力），
+                # 英文一手权威源不再因中文 query 被系统性误判 ❌噪声
+                # （D1 实锤：§8.11.1 ualberta.ca 官方源仅 9 分）。
+                # 仅抬升底线的 max 语义——不改变任何既有命中路径（零回归契约）；
+                # env 闸 INFOSEEK_XLING_BRIDGE（默认开）。
+                # ⚠️ _xling_mod 模块对象属性访问（晚绑定），禁 from-import（§8.13.3 铁律）。
+                try:
+                    xling_bridge_score = _xling_mod.bridge_score(text, subject) or 0
+                except Exception:
+                    xling_bridge_score = 0
+                if xling_bridge_score > base_score:
+                    base_score = xling_bridge_score
+                base_origin = 'semantic_fallback'
         except Exception:
             pass  # 兜底失败则维持 0，不影响主流程
 
-    # 2) 信任源加权（v2 新增）
-    # 先尝试检测 domain（如未指定）
+    # 2) 领域探测（prefer_kb 未显式指定时由 detect_domain 判定）
     domain = source.get('domain')
+    _prefer_kb = prefer_kb
     if not domain:
         try:
-            sys.path.insert(0, str(INFOSEEK_ROOT / 'scripts'))
+            _ensure_paths()
             from domain_router import detect_domain
             routing = detect_domain(subject)
             domain = routing.get('domain') or 'general'
+            if _prefer_kb is None:
+                _prefer_kb = bool(routing.get('prefer_kb'))
         except Exception:
             domain = 'general'
 
-    trust_bonus = compute_trust_bonus(source.get('url', ''), domain, source.get('platform', ''))
+    # 3) 信任加权取值（真源 trust_sources，0-30）+ KB 交集加权（单源 domain_router，0-12）
+    trust_bonus_base = compute_trust_bonus(source.get('url', ''), domain, source.get('platform', ''))
+    kb_bonus = 0
+    if _prefer_kb:
+        try:
+            from domain_router import kb_intersect_bonus
+            # v1.8.3：双参口径（domain_profile 显式传入时 intersect_boost 声明生效；
+            # None 时与单参等价 → v1.7.2 契约数值不变）
+            kb_bonus = kb_intersect_bonus(source, domain_profile)
+        except Exception:
+            kb_bonus = 0
+    # 字段归属沿用 v1.7.2 契约（KB 加分计入 trust_bonus；test_prefer_kb_transfer T8/T14 锁定）
+    trust_bonus = trust_bonus_base + kb_bonus
     tier = get_tier_level(source.get('url', ''), domain)
 
-    # 3) 合并
-    final = min(base_score + trust_bonus, 100)
-
-    # 4) 分类
-    if final >= 70:
-        classification = '🟢核心'
-    elif final >= 40:
-        classification = '🟡潜力'
+    # 4) 时间衰减入口（v1.8.3 补齐；默认读 source，缺省 0 → 与 v1.8.2 行为一致）
+    if days_since_published is None:
+        try:
+            _days = int(source.get('days_since_published', 0) or 0)
+        except (TypeError, ValueError):
+            _days = 0
     else:
-        classification = '❌噪声'
+        try:
+            _days = int(days_since_published)
+        except (TypeError, ValueError):
+            _days = 0
 
-    return {
+    # 5) 领域加权（旁路字段，仅报告不计入 final —— 见 docstring 口径声明）
+    domain_bonus = source.get('_scoring', {}).get('domain_bonus', 0)
+
+    # 6) 聚合（唯一真源，禁止自算公式）
+    try:
+        agg = aggregate_score_v2(base_score, days_since_published=_days,
+                                 trust_bonus=trust_bonus, domain_bonus=0)
+        final = agg['final_score']
+        classification = agg['classification']
+        extra = {'after_decay': agg['after_decay'],
+                 'decay_factor': agg['decay_factor'],
+                 'whitelist_triggered': agg['whitelist_triggered']}
+    except Exception:
+        # 降级保底（非常态：core 同仓必然可导入）。**不做平行口径自算**，
+        # 仅取最小可用聚合并显式标记 degraded，供守护测试与审计发现。
+        warnings.warn('aggregate_score_v2 不可用，score_source 走降级保底聚合',
+                      RuntimeWarning, stacklevel=2)
+        final = min(base_score + trust_bonus, 100)
+        classification = '🟢核心' if final >= 70 else ('🟡潜力' if final >= 40 else '❌噪声')
+        extra = {'after_decay': float(base_score), 'decay_factor': 1.0,
+                 'whitelist_triggered': base_score >= 90, '_aggregate_degraded': True}
+
+    result = {
         'final_score': final,
         'base_score': base_score,
+        'base_origin': base_origin,
         'tier': tier,
         'trust_bonus': trust_bonus,
-        'domain_bonus': source.get('_scoring', {}).get('domain_bonus', 0),
+        'trust_bonus_base': trust_bonus_base,
+        'kb_bonus': kb_bonus,
+        'domain_bonus': domain_bonus,
+        'xling_bridge': xling_bridge_score,  # v1.9.0 GA10（新增字段，向后兼容）
         'classification': classification,
         'version': '1.2.0',
     }
+    result.update(extra)
+    return result
 
 
 def score_sources_batch_async(sources: List[Dict], subject: str,
-                              with_domain: bool = True) -> List[Dict]:
+                              with_domain: bool = True,
+                              prefer_kb: bool = None) -> List[Dict]:
     """v2.5.0 MINOR 新增：批量异步评分（asyncio.gather 并行 8 维度）
 
     benchmark 结果（100 源 × 8 维度 × 2-4ms 模拟 IO）：
@@ -171,25 +321,25 @@ def score_sources_batch_async(sources: List[Dict], subject: str,
     except RuntimeError:
         # 无运行中的 loop，同步执行
         try:
-            return asyncio.run(_gather_all(sources, subject, with_domain))
+            return asyncio.run(_gather_all(sources, subject, with_domain, prefer_kb))
         except RuntimeError:
             # 沙箱环境可能没正常 event loop → 退化为串行
-            return [score_source(s, subject, with_domain) for s in sources]
+            return [score_source(s, subject, with_domain, prefer_kb) for s in sources]
     # 有 running loop（罕见：用户在 async 上下文调同步入口）
     # 用 ThreadPoolExecutor 跑异步
     import concurrent.futures
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
-            asyncio.run, _gather_all(sources, subject, with_domain)
+            asyncio.run, _gather_all(sources, subject, with_domain, prefer_kb)
         )
         return future.result()
 
 
-async def _gather_all(sources, subject, with_domain):
+async def _gather_all(sources, subject, with_domain, prefer_kb=None):
     import asyncio
     loop = asyncio.get_event_loop()
     tasks = [
-        loop.run_in_executor(None, score_source, src, subject, with_domain)
+        loop.run_in_executor(None, score_source, src, subject, with_domain, prefer_kb)
         for src in sources
     ]
     return await asyncio.gather(*tasks)
@@ -202,6 +352,9 @@ def detect_conflicts(sources: List[Dict], subject: str = '') -> Dict:
     1. 实体感知：先抽实体，按实体分组冲突
     2. 实体相似度：跨语言实体匹配（如 OpenAI ↔ openai ↔ OPENAI）
     """
+    # v1.9.0 GA9④：人名实体引导（直接调用冲突检测工具时也保证 person 实体族可见）
+    _bootstrap_persons(subject)
+
     # 1) 调用 v1 conflict_detection.detect_conflicts()
     sys.path.insert(0, str(INFOSEEK_ROOT / 'scripts'))
     try:
@@ -243,7 +396,8 @@ def detect_conflicts(sources: List[Dict], subject: str = '') -> Dict:
 
 def render_report(subject: str, sources: List[Dict],
                   format: str = 'md',
-                  domain: Optional[str] = None) -> str:
+                  domain: Optional[str] = None,
+                  prefer_kb: bool = None) -> str:
     """v2 报告渲染（调用 domain_orchestrator 或 exporter）
 
     参数:
@@ -267,7 +421,7 @@ def render_report(subject: str, sources: List[Dict],
     # 先用 v2 scoring
     scored_sources = []
     for s in sources:
-        v2_score = score_source(s, subject)
+        v2_score = score_source(s, subject, prefer_kb=prefer_kb)
         s_copy = dict(s)
         s_copy['score'] = v2_score['final_score']
         s_copy['_v2'] = v2_score
@@ -296,7 +450,8 @@ def research(subject: str,
              domain: Optional[str] = None,
              with_llm: bool = False,
              output_format: str = 'md',
-             lite: bool = False) -> Dict[str, Any]:
+             lite: bool = False,
+             prefer_kb: bool = None) -> Dict[str, Any]:
     """v2 端到端调研主入口
 
     完整流程：
@@ -338,6 +493,9 @@ def research(subject: str,
     """
     sources = sources or []
 
+    # v1.9.0 GA9④：人名实体引导（幂等；下游 NER/冲突/图谱可见）
+    _bootstrap_persons(subject)
+
     # v2.5.3 PATCH: 在 async 上下文调用 research() 时发 deprecation warning，
     # 建议改用 async_research() 避免阻塞 event loop（不破坏既有调用）
     try:
@@ -353,13 +511,14 @@ def research(subject: str,
         pass  # 无运行中的 loop，正常执行
 
     # 1) 评分
-    scored = [score_source(s, subject) for s in sources]
+    scored = [score_source(s, subject, prefer_kb=prefer_kb) for s in sources]
 
     # 2) 冲突检测
     conflicts = detect_conflicts(sources, subject=subject)
 
     # 3) 报告渲染
-    report = render_report(subject, sources, format=output_format, domain=domain)
+    report = render_report(subject, sources, format=output_format, domain=domain,
+                           prefer_kb=prefer_kb)
 
     result = {
         'subject': subject,
@@ -458,9 +617,10 @@ def research(subject: str,
     # v2.4.1 PATCH (DEF-E): lite 模式跳过 traced_export dot 渲染（>10 源时极慢）
     try:
         sys.path.insert(0, str(INFOSEEK_ROOT / 'core'))
-        from entity_graph import EntityGraph
+        from entity_graph import EntityGraph, set_global_graph
         graph = EntityGraph()
         graph.build_from_sources(sources)
+        set_global_graph(graph)  # v2.5.0 G3: 注册全局图谱（召回扩展复用）
         result['entity_graph'] = graph.to_dict()
         if not lite:
             try:
@@ -570,7 +730,8 @@ async def async_research(subject: str,
                         sources: Optional[List[Dict]] = None,
                         domain: Optional[str] = None,
                         output_format: str = 'md',
-                        lite: bool = False) -> Dict[str, Any]:
+                        lite: bool = False,
+                        prefer_kb: bool = None) -> Dict[str, Any]:
     """v2.5.0 MINOR 新增；v2.5.2 PATCH: 深度异步化
 
     v2.5.0：评分 + wikidata 异步，其余 6 步骤走同步
@@ -585,13 +746,16 @@ async def async_research(subject: str,
     import asyncio
     sources = sources or []
 
+    # v1.9.0 GA9④：人名实体引导（幂等；下游 NER/冲突/图谱可见）
+    _bootstrap_persons(subject)
+
     # 任务调度：5 个 IO 密集步骤并发
     tasks = {}
 
     # 1+2: 异步批量评分（已 v2.5.0 实现）
     if sources:
         tasks['scored'] = asyncio.create_task(
-            asyncio.to_thread(score_sources_batch_async, sources, subject)
+            asyncio.to_thread(score_sources_batch_async, sources, subject, True, prefer_kb)
         )
     else:
         tasks['scored'] = asyncio.create_task(asyncio.sleep(0, result=[]))
@@ -629,6 +793,7 @@ async def async_research(subject: str,
                 from traced_export import build_traced, to_dot
                 g = EntityGraph()
                 eg = await asyncio.to_thread(g.build_from_sources, sources)
+                set_global_graph(g)  # v2.5.0 G3: 注册全局图谱（召回扩展复用）
                 # v2.5.4 PATCH: traced_export 缺失导致 v2.5.2 输出与 research() 不一致，
                 # 现补回（lite 模式也可保留用于诊断）
                 try:
@@ -746,7 +911,8 @@ async def async_research(subject: str,
 
     # render_report 同步（v2.5.2 不深度异步化）
     try:
-        report = render_report(subject, sources, format=output_format, domain=domain)
+        report = render_report(subject, sources, format=output_format, domain=domain,
+                               prefer_kb=prefer_kb)
     except Exception as e:
         report = f'[error] {e}'
 
@@ -825,7 +991,8 @@ async def streaming_research(subject: str,
                             sources: Optional[List[Dict]] = None,
                             domain: Optional[str] = None,
                             output_format: str = 'md',
-                            lite: bool = False) -> 'AsyncIterator[Dict]':
+                            lite: bool = False,
+                            prefer_kb: bool = None) -> 'AsyncIterator[Dict]':
     """v3.0.0 GA: 流式研究（AsyncIterator，v3.0.0-dev Sprint 1 引入，rc1 冻结协议）
 
     yield 顺序（每步独立 yield dict）:
@@ -849,13 +1016,16 @@ async def streaming_research(subject: str,
     import asyncio
     sources = sources or []
 
+    # v1.9.0 GA9④：人名实体引导（幂等；下游 NER/冲突/图谱可见）
+    _bootstrap_persons(subject)
+
     # 任务调度：与 async_research 相同的 5 个 task
     tasks = {}
 
     # 1+2: 评分
     if sources:
         tasks['scored'] = asyncio.create_task(
-            asyncio.to_thread(score_sources_batch_async, sources, subject)
+            asyncio.to_thread(score_sources_batch_async, sources, subject, True, prefer_kb)
         )
     else:
         async def _empty():
