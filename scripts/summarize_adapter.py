@@ -8,22 +8,11 @@
   from summarize_adapter import summarize
   result = summarize(text="...", max_words=100)
 """
-import hashlib
 import json
 import os
 import re
 import sys
 from pathlib import Path
-
-# v1.0.0 状态层中立：摘要缓存统一位于运行时数据目录（env INFOSEEK_DATA_DIR → ~/.infoseek）
-CORE_DIR = Path(__file__).parent.parent / 'core'
-if str(CORE_DIR) not in sys.path:
-    sys.path.insert(0, str(CORE_DIR))
-from state_dir import state_path
-
-WORKSPACE = Path(os.environ.get('OPENCLAW_WORKSPACE', str(Path.home())))
-SUMMARIZE_CACHE = state_path('summarize_cache.json')
-
 
 def _summa_summarize(text: str, max_words: int = 100) -> dict:
     """summa TextRank 主路径（沙箱内置，零依赖）"""
@@ -52,7 +41,6 @@ def _summa_summarize(text: str, max_words: int = 100) -> dict:
         }
     except ImportError:
         return None
-
 
 def _dual_run(text: str, max_words: int = 100) -> dict:
     """v1.7.2 新增：双跑择优（summa + jieba 都跑，取关键词多的）
@@ -105,7 +93,6 @@ def _dual_run(text: str, max_words: int = 100) -> dict:
         result['method'] = f"tri_{result.get('method', 'unknown')}"
     return result
 
-
 def _zerodep_summarize(text: str, max_words: int = 100) -> dict:
     """v1.0.0 新增：零依赖共识兜底（最终防线，纯标准库，中英文皆可）
 
@@ -133,7 +120,6 @@ def _zerodep_summarize(text: str, max_words: int = 100) -> dict:
         }
     except Exception:
         return None
-
 
 def _regex_summarize(text: str, max_words: int = 100) -> dict:
     """v1.7.3 新增：纯正则+词频英文 fallback（无 summa/jieba 时）
@@ -192,7 +178,6 @@ def _regex_summarize(text: str, max_words: int = 100) -> dict:
         "summary_length": len(summary),
         "fallback_used": False
     }
-
 
 def _jieba_summarize(text: str, max_words: int = 100) -> dict:
     """jieba 中文路径（v1.7.1 新增，针对中文文本优化）
@@ -256,7 +241,6 @@ def _jieba_summarize(text: str, max_words: int = 100) -> dict:
     except ImportError:
         return None
 
-
 def _auto_detect_summarizer(text: str) -> str:
     """根据文本语言自动选择摘要器（v1.7.1 新增）
 
@@ -270,7 +254,6 @@ def _auto_detect_summarizer(text: str) -> str:
     chinese_ratio = chinese_chars / total_chars
     return "jieba" if chinese_ratio > 0.3 else "summa"
 
-
 def _truncation_fallback(text: str, max_chars: int = 500) -> dict:
     """最低级降级：截断前 N 字符（永远可用）"""
     return {
@@ -282,7 +265,6 @@ def _truncation_fallback(text: str, max_chars: int = 500) -> dict:
         "fallback_used": True,
         "fallback_reason": "summa 未安装"
     }
-
 
 def _llm_summarize(text: str, max_words: int, api_key: str, api_base: str = None, model: str = "claude-haiku-4-5-20251001") -> dict:
     """LLM API 兜底路径（需要 API Key）
@@ -394,7 +376,6 @@ def _llm_summarize(text: str, max_words: int, api_key: str, api_base: str = None
 
     except Exception as e:
         return None  # LLM 调用失败 → 降级到 summa
-
 
 def summarize(text: str, max_words: int = 100, prefer: str = "summa", llm_api_key: str = None,
              llm_api_base: str = None, llm_model: str = None) -> dict:
@@ -508,7 +489,6 @@ def summarize(text: str, max_words: int = 100, prefer: str = "summa", llm_api_ke
 
     return result
 
-
 def summarize_url(url: str, max_words: int = 100, prefer: str = "summa",
                   llm_api_key: str = None, fetch_timeout: int = 30) -> dict:
     """
@@ -520,7 +500,6 @@ def summarize_url(url: str, max_words: int = 100, prefer: str = "summa",
     # 实际集成时，应该先调 fetch_content，再调 summarize
     # 这里只占位
     raise NotImplementedError("请先调用 fetch_content 获取文本，再调用 summarize(text=...)")
-
 
 # CLI 入口
 def main():
@@ -552,7 +531,6 @@ def main():
     )
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
-
 
 if __name__ == '__main__':
     main()
