@@ -58,3 +58,13 @@ Anchor_Score:
 ## 关联 Skill
 - 检测到"政策/法规/标准/合规/监管" → 自动启用 policy-research profile
 - 与 tech-research profile 联动（标准类内容）
+
+
+## 领域路由参数 (v1.7.5)
+
+> 声明层配置：由 `domain_router.parse_domain_params()` 解析；缺省回落全局常量。
+
+```yaml
+intersect_boost: 8   # 交集场景单 KB 源加分（默认 8）
+kb_priority: false         # 交集场景优先 KB 源
+```
