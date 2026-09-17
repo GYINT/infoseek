@@ -1,8 +1,8 @@
-tests/
-__pycache__/
+# npm 发布排除项（GitHub 仓库保留完整功能文件）
+.gitignore
 *.pyc
-.git/
-*.tmp
-*.log
+__pycache__/
+.pytest_cache/
+dist/*.json
 .DS_Store
-_REGISTER_STATUS.md
+*.swp
