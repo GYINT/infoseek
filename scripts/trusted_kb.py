@@ -25,7 +25,7 @@ def _load_kb() -> dict:
     """加载知识库"""
     if not os.path.exists(KB_PATH):
         log.warning(f"KB文件不存在: {KB_PATH}")
-        return {"version": "0", "sources": []}
+        return {"version": "2.0.0", "schema": "dual-segment(v2.0)", "white_list": [], "kb_sources": []}
     with open(KB_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -62,7 +62,7 @@ def kb_lookup(topic: str, limit: int = 5) -> list:
 
     kb = _load_kb()
     matches = []
-    for src in kb.get("sources", []):
+    for src in kb.get("kb_sources", []) + kb.get("white_list", []):
         src_topics = [t.lower() for t in src.get("topics", [])]
         matched_kws = [kw for kw in keywords if any(kw in st or st in kw for st in src_topics)]
         if matched_kws:
@@ -97,12 +97,71 @@ def kb_fallback(topic: str, limit: int = 5) -> list:
     return results
 
 
-def kb_merge(web_results: list, kb_hits: list) -> list:
+# 域种子词：域感知扩展查询（kb_enrich 用，与 domain_router 5 域体系对齐）
+KB_DOMAIN_SEEDS = {
+    "tech-research": ["工艺", "材料", "技术", "软件", "代码", "算法", "芯片", "硬件", "制造", "标准"],
+    "market-research": ["市场", "行业", "规模", "消费", "需求", "报告", "用户", "数据"],
+    "finance-research": ["股票", "基金", "债券", "期货", "行情", "估值", "上市公司", "证券"],
+    "policy-research": ["政策", "法规", "标准", "监管", "政府", "条例"],
+    "competitor-intel": ["企业", "公司", "工商", "竞品", "股东", "融资", "股权"],
+}
+
+
+def kb_enrich(query: str, domain: Optional[str] = None, limit: int = 8,
+              prefer_kb: bool = False) -> list:
+    """
+    域感知扩展查询：单主题命中不足时，用域种子词横向扩展检索面。
+
+    - domain 可显式传入（如 detect_domain 判定结果）；缺省时自动尝试判定
+    - 返回 kb_lookup 同构结果（含 _kb_domain 标注），按可信度降序
+    - 自动判定失败 / domain 无种子词 → 返回 []（非致命）
+    """
+    try:
+        from domain_router import detect_domain
+    except ImportError:
+        return []
+    if not domain:
+        det = detect_domain(query)
+        if not det or not det.get("domain"):
+            return []
+        domain = det["domain"]
+    seeds = KB_DOMAIN_SEEDS.get(domain)
+    if not seeds:
+        return []
+    hits, seen, hit_counts = [], set(), {}
+    for kw in seeds:
+        for r in kb_lookup(kw, limit=limit):
+            entry = r.get("entry", "")
+            hit_counts[entry] = hit_counts.get(entry, 0) + 1
+            if entry in seen:
+                continue
+            seen.add(entry)
+            r["_kb_domain"] = domain
+            hits.append(r)
+    # G3/G4 (v1.7.2)：注入多 KB 命中数，供 prefer_kb 分段（单 KB +8 / 多 KB 额外 +4
+    # 合计 +12，与 domain_router.kb_intersect_bonus 口径一致 · v1.8.3 勘误）实际触发
+    for r in hits:
+        r["_kb_hit_count"] = hit_counts.get(r.get("entry", ""), 1)
+    # prefer_kb（交集场景）：排序键叠加交集加分 → KB 源上浮
+    if prefer_kb:
+        try:
+            from domain_router import kb_intersect_bonus
+            hits.sort(key=lambda x: x.get("_credibility_base", 0) + kb_intersect_bonus(x),
+                      reverse=True)
+        except ImportError:
+            hits.sort(key=lambda x: x.get("_credibility_base", 0), reverse=True)
+    else:
+        hits.sort(key=lambda x: x.get("_credibility_base", 0), reverse=True)
+    return hits[:limit]
+
+
+def kb_merge(web_results: list, kb_hits: list, prefer_kb: bool = False) -> list:
     """
     合并web搜索结果与KB命中结果。
 
     规则：
-    1. KB源享 credibility +5 提升（预置信任加成）
+    1. KB源享 credibility 加成：默认 +5；prefer_kb（多域交集场景）时改为分段
+       （单 KB +8 / 多 KB +12，与 domain_router.kb_intersect_bonus 对齐）
     2. 去重：domain 相同则合并，取高评分
     3. KB源排在同等分 web 源之前
     """
@@ -119,8 +178,15 @@ def kb_merge(web_results: list, kb_hits: list) -> list:
     for r in kb_hits:
         domain = _extract_domain(r.get("entry", ""))
         r["_domain"] = domain
-        # KB源 credibility 加成
-        cred_boost = r.get("_credibility_base", 80) + 5
+        # KB源 credibility 加成：默认 +5；prefer_kb 交集场景按分段（+8 / +12）
+        _boost = 5
+        if prefer_kb:
+            try:
+                from domain_router import kb_intersect_bonus
+                _boost = max(_boost, kb_intersect_bonus(r))
+            except ImportError:
+                pass
+        cred_boost = r.get("_credibility_base", 80) + _boost
         r["_kb_boosted"] = True
         r["_original_score"] = r.get("score", 0)
 
@@ -159,7 +225,7 @@ def kb_add(
         return False
 
     kb = _load_kb()
-    existing = [s for s in kb.get("sources", []) if s["domain"] == domain]
+    existing = [s for s in (kb.get("kb_sources", []) + kb.get("white_list", [])) if s.get("domain") == domain]
     if existing:
         log.info(f"KB已存在: {domain}")
         return False
@@ -167,13 +233,17 @@ def kb_add(
     entry = {
         "domain": domain,
         "name": name,
+        "domain_key": "general",
         "topics": topics[:8],  # 最多保留8个主题词
         "credibility": credibility,
         "type": source_type or "web",
         "access": "web",
         "verified": verified,
+        "tier": 2 if credibility >= 85 else 3,
+        "weight": 20 if credibility >= 85 else 13,
+        "patterns": [],
     }
-    kb.setdefault("sources", []).append(entry)
+    kb.setdefault("kb_sources", []).append(entry)
     ok = _save_kb(kb)
     if ok:
         log.info(f"KB新增源: {domain} ({credibility}分)")
