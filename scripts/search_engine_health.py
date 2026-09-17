@@ -35,15 +35,12 @@ FREE_PROBES = {
 
 
 def probe_http(url: str, timeout: float) -> tuple:
-    """返回 (ok, elapsed, err)"""
-    import urllib.request
-    t0 = time.time()
+    """返回 (ok, elapsed, err)——GA12 起委托 net_probe 唯一真源（同构签名，严格 200）。"""
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status == 200, round(time.time() - t0, 2), ''
-    except Exception as e:
-        return False, round(time.time() - t0, 2), str(e)[:80]
+        from net_probe import probe_http as _probe
+    except Exception:
+        from scripts.net_probe import probe_http as _probe  # type: ignore
+    return _probe(url, timeout)
 
 
 def main() -> int:
