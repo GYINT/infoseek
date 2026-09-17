@@ -64,11 +64,99 @@ _DEFAULT_REGISTRY = {
          "cost_model": "credits", "health_probe": "engine_lifecycle",
          "degrade_to": ["QVeris", "PublicApisCatalog", "manual_review"],
          "venv_hint": "pip install mcp（AgentKey 为 MCP 网关）"},
+        # v1.4.2 新增：L2 多引擎渲染器（browser_engine 能力族）
+        {"name": "L2Renderer", "kind": "browser_engine", "enabled": False,
+         "requires_consent": False, "auth_env": "", "weight": 0.8,
+         "cost_model": "none", "health_probe": "engine_lifecycle",
+         "degrade_to": ["manual_review"],
+         "venv_hint": "pip install camoufox patchright（Obscura 需二进制）"},
+        # v1.6.0 融入：FakeDetect 账号深度取证（account_forensics 行为取证新族）
+        # 验证层二级（AccountTrustScorer 升级）：L1统计+L2图结构+L3ML+时序同步
+        # 命门=数据充分性门控（缺数据≠水军）；consent 双闸，默认 OFF
+        {"name": "FakeDetect", "kind": "account_forensics", "enabled": False,
+         "requires_consent": True, "auth_env": "", "weight": 0.85,
+         "env_var": "INFOSEEK_ENABLE_FAKE_DETECT",
+         "cost_model": "none", "health_probe": "engine_lifecycle",
+         "degrade_to": ["AccountTrustScorer", "manual_review"],
+         "venv_hint": "extensions/fake_detect/requirements.txt"},
+        # GA12（v2.0.0）：3 个网络依赖能力化（沙箱受限 host，默认 OFF）
+        {"name": "WikiVerify", "kind": "knowledge_verify", "enabled": False,
+         "requires_consent": False, "auth_env": "", "weight": 0.6,
+         "cost_model": "none", "health_probe": "none",
+         "degrade_to": ["manual_review"],
+         "network_boundary": "sandbox_restricted",
+         "requires_hosts": ["www.wikidata.org", "query.wikidata.org",
+                            "en.wikipedia.org", "zh.wikipedia.org"]},
+        {"name": "L4Transcribe", "kind": "multimedia_transcribe", "enabled": False,
+         "requires_consent": False, "auth_env": "", "weight": 0.5,
+         "cost_model": "none", "health_probe": "none",
+         "degrade_to": ["manual_review"],
+         "network_boundary": "sandbox_restricted",
+         "requires_hosts": ["storage.googleapis.com", "r.jina.ai"]},
+        {"name": "PatentLookup", "kind": "patent_lookup", "enabled": False,
+         "requires_consent": False, "auth_env": "", "weight": 0.5,
+         "cost_model": "none", "health_probe": "none",
+         "degrade_to": ["manual_review"],
+         "network_boundary": "sandbox_restricted",
+         "requires_hosts": ["patents.google.com", "github.com"]},
         {"name": "manual_review", "kind": "graceful_fallback", "enabled": True,
          "requires_consent": False, "auth_env": "", "weight": 0.0,
-         "cost_model": "none", "health_probe": "none", "degrade_to": []},
+         "cost_model": "none", "health_probe": "none", "degrade_to": [],
+         "network_boundary": "local", "requires_hosts": []},
+    ],
+    # GA12 host 台账（内嵌回退副本，与 registry.yaml network_boundaries 同步）
+    "network_boundaries": [
+        {"host": "www.wikidata.org", "boundary": "sandbox_restricted",
+         "used_by": ["WikiVerify"]},
+        {"host": "query.wikidata.org", "boundary": "sandbox_restricted",
+         "used_by": ["WikiVerify"]},
+        {"host": "en.wikipedia.org", "boundary": "sandbox_restricted",
+         "used_by": ["WikiVerify"]},
+        {"host": "zh.wikipedia.org", "boundary": "sandbox_restricted",
+         "used_by": ["WikiVerify"]},
+        {"host": "commons.wikimedia.org", "boundary": "sandbox_restricted",
+         "used_by": []},
+        {"host": "upload.wikimedia.org", "boundary": "sandbox_restricted",
+         "used_by": []},
+        {"host": "api.wikimedia.org", "boundary": "sandbox_restricted",
+         "used_by": []},
+        {"host": "storage.googleapis.com", "boundary": "sandbox_restricted",
+         "used_by": ["L4Transcribe"]},
+        {"host": "r.jina.ai", "boundary": "sandbox_restricted",
+         "used_by": ["L4Transcribe"]},
+        {"host": "patents.google.com", "boundary": "sandbox_restricted",
+         "used_by": ["PatentLookup"]},
+        {"host": "github.com", "boundary": "sandbox_restricted",
+         "used_by": ["PatentLookup"]},
     ],
 }
+
+def consent_log_path() -> str:
+    """合规授权日志路径（~/.infoseek/consent.log；M1.1/T8 审计 UX）。"""
+    try:
+        from core.state_dir import get_data_dir
+    except Exception:
+        try:
+            from state_dir import get_data_dir
+        except Exception:
+            return ""
+    return str(get_data_dir() / "consent.log")
+
+
+def _append_consent_log(event: str, name: str) -> None:
+    """授权/撤销落盘（非阻塞；审计失败不影响运行）。"""
+    try:
+        p = consent_log_path()
+        if not p:
+            return
+        from datetime import datetime
+        import os
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat()} {event} {name}\n")
+    except Exception:
+        pass
+
 
 _lock = threading.Lock()
 _cache: Optional[Dict] = None
@@ -119,14 +207,16 @@ def requires_consent(name: str) -> bool:
 
 
 def grant_consent(name: str) -> None:
-    """合规闸口：记录运行期授权（非持久，进程级）。"""
+    """合规闸口：记录运行期授权（非持久，进程级）+ 授权审计落盘（T8 consent.log）。"""
     with _lock:
         _consent_state[name] = True
+    _append_consent_log("grant", name)
 
 
 def revoke_consent(name: str) -> None:
     with _lock:
         _consent_state.pop(name, None)
+    _append_consent_log("revoke", name)
 
 
 def consent_granted(name: str) -> bool:
@@ -135,8 +225,12 @@ def consent_granted(name: str) -> bool:
 
 
 def _env_override(name: str) -> Optional[bool]:
-    """INFOSEEK_ENABLE_<NAME> 显式覆盖（1/true/on 启用，0/false/off 禁用）。"""
-    env = os.environ.get(f"INFOSEEK_ENABLE_{name.upper()}")
+    """INFOSEEK_ENABLE_<NAME> 显式覆盖（1/true/on 启用，0/false/off 禁用）。
+    支持条目显式 env_var 字段（兼容驼峰能力名的语义化 env 命名，
+    如 FakeDetect -> INFOSEEK_ENABLE_FAKE_DETECT，缺省回退自动推导）。"""
+    cap = get_capability(name)
+    env_name = (cap or {}).get("env_var") or f"INFOSEEK_ENABLE_{name.upper()}"
+    env = os.environ.get(env_name)
     if env is None:
         return None
     return env.lower() not in ("0", "false", "no", "off")
@@ -176,6 +270,43 @@ def degrade_chain(name: str, _seen: Optional[set] = None) -> List[str]:
                 continue
             chain.extend(degrade_chain(nxt, seen))
     return chain
+
+
+# ── GA12（v2.0.0）网络边界访问器 ───────────────────────────
+VALID_BOUNDARIES = ("open", "sandbox_restricted", "local")
+
+
+def get_requires_hosts(name: str) -> List[str]:
+    """能力声明的依赖 host 列表（未声明 → []）。"""
+    cap = get_capability(name)
+    if not cap:
+        return []
+    hosts = cap.get("requires_hosts") or []
+    return [str(h) for h in hosts]
+
+
+def get_network_boundary(name: str) -> Optional[str]:
+    """能力的网络边界声明（open/sandbox_restricted/local）；未声明 → None。"""
+    cap = get_capability(name)
+    if not cap:
+        return None
+    b = cap.get("network_boundary")
+    return b if b in VALID_BOUNDARIES else None
+
+
+def get_network_boundaries() -> Dict[str, Dict]:
+    """host 台账：{host: {boundary, used_by, evidence}}（含 yaml 与内嵌回退）。"""
+    raw = _load_raw()
+    out: Dict[str, Dict] = {}
+    for item in raw.get("network_boundaries", []) or []:
+        host = item.get("host")
+        if host:
+            out[host] = {
+                "boundary": item.get("boundary"),
+                "used_by": list(item.get("used_by") or []),
+                "evidence": item.get("evidence", ""),
+            }
+    return out
 
 
 def reload() -> None:
