@@ -59,3 +59,13 @@ Anchor_Score:
 ## 关联 Skill
 - 检测到"钢/铝/铜/合金等金属"+"分切/轧制/退火"→ 自动启用 tech-research profile
 - 检测到"化学/分子式/反应"→ 切换 profile
+
+
+## 领域路由参数 (v1.7.5)
+
+> 声明层配置：由 `domain_router.parse_domain_params()` 解析；缺省回落全局常量。
+
+```yaml
+intersect_boost: 8   # 交集场景单 KB 源加分（默认 8）
+kb_priority: true         # 交集场景优先 KB 源
+```
