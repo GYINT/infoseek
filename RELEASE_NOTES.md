@@ -1,167 +1,178 @@
-# Infoseek v1.2.0 发布说明
+# Infoseek v2.0.0 发布说明
 
-> 发布日期：2026-08-20 ｜ 版本：1.2.0（能力里程碑）｜ 许可证：MIT ｜ 类型：开源
-> 前置：v1.0.1（审计 G1–G13 + ABC 增强 + 引擎生命周期 P0–P3）
-
----
+> 发布日期：2026-09-16 ｜ 版本：**2.0.0**（GA11 键控事实槽 C 混合分层 + GA12 网络边界门控）｜ 许可证：MIT
+> 前置：v1.9.0（GA9 人名消歧 + GA10 跨语言别名桥接）。MAJOR 定级：GA11 更换矛盾评分的事实槽口径（判定语义变更）。
 
 ## 一句话总结
 
-Infoseek 是一套**端到端的内容智能采集与调研工作流**——从行业/主题/人名输入开始，自动嗅探信息源、四维评分门控、4 级深度抓取、矛盾检测、实体图谱，最终输出结构化 Markdown 报告。**纯 Python、外部依赖全可选降级、可跨生态部署**。
+**P3 深水区落地**：GA11 把语义矛盾检测从「短语袋 Jaccard 相似度」重构为「同槽键值冲突」
+键控事实槽（keyed slots），段落级口径差异从 **12/12 漏判（none）→ 8/8 真实差异召回、同义复述零误报**；
+GA12 建立网络边界探测门控（probe 单源化 + 能力 host 声明 + 执行前门控），让沙箱受限能力
+**显式降级留痕而非静默长超时**。两路均守既有设计哲学：默认 OFF / 降级链 / 老契约不变。
+全量回归 **59 PASS / 0 FAIL / 0 SKIP / 0 TIMEOUT（90.0s）**。
 
-v1.2.0 是能力里程碑版本：补齐搜索引擎全生命周期管理、搜索召回增强、4 级抓取（L3 凭证 / L4 多媒体）、Key 管理全生命周期，并通过 10k 源性能基准验证线性可扩展。
+## v2.0.0 核心改动
 
----
+### GA11 · 键控事实槽（C 混合分层）
 
-## v1.2.0 核心特性
+1. **数据真源** `references/contradiction-synonyms.json`：20 个方面谓词簇（中英）+ 8 方面互斥对
+   + 否定词 + 主体停用词。
+2. **A 层（默认零依赖）** `core/contradiction_scorer.py`：槽键=(主体键, 方面)，值=数值/枚举/极性；
+   仅同键值冲突计分。主体契约驱动（entity/subject，不同主体不比）；数值全文单次扫描+左优先
+   就近唯一归属（指标后侧窄窗、趋势词仅收百分比、年份专归 founded_year、季度/裸年份排除、
+   「百分之二十」中文归一）；同值对跨槽去重；keyed 与否定路 **max 融合不叠加**。
+   裁决：单冲突 35（medium）/2 槽 60/≥3 槽 85；长文本保护 50k/500/200 上限。
+3. **B 层（opt-in）** `score_contradiction_hybrid()`（`INFOSEEK_CONTRADICTION_LLM=1`）：
+   LLM JSON 槽表复用键控比对，表外方面动态键，温度 0 + 缓存，降级链 B→A→legacy。
+4. **契约**：新增 `keyed_score`/`conflict_slots`/`scorer_mode`，老字段语义不变。
+5. **质量**：12 组段落语料 8 真实差异全召回（4 强 ≥medium + 4 细微 low+），4 同义复述零误报；
+   L1-01..06 逐条零回归；100 字 vs 300 字同判不稀释。守护测试 38 断言。
 
-| 能力 | 说明 |
-|---|---|
-| 🧭 **搜索引擎全生命周期** | 健康状态机 / 配额追踪（429 自动退出）/ 认证粘滞 / **新鲜度自愈**（配额重置恢复、冷却恢复、API 漂移检测、TTL 对账）+ CLI engine-status/reconcile/probe/reset |
-| 🎯 **搜索召回增强** | query 别名扩展（实体别名跨名召回）/ 跨引擎多样性轮询（防单源垄断）/ 自适应相关性门槛 / 动态层权重（opt-in） |
-| 🕸️ **4 级抓取** | L1 静态 → L2 playwright 渲染 → L3 凭证辅助（KeyManager 注入，**仅内存不落盘**）→ L4 多媒体统一 chunk（whisper 可选降级） |
-| 🔑 **Key 管理** | 归一化 Key 管理（多后端 / 状态机 / 熔断 / 多 key 池 / 配额 / token 成本折算 / 加密落盘 + 系统 keyring）+ CLI 16 子命令 |
-| ⚡ **perf 10k 基准** | 10k 源实测近线性扩展（评分 139s / 冲突 89s / research 97s），无指数退化 |
-| ✅ **质量基线** | 全量回归 25/25 套件 PASS；质量基线 26/26 all_ok；符号自检 9 模块 ALL OK |
+### GA12 · 网络边界门控（五步链，默认 OFF 零行为变更）
 
-## 多生态适配
+1. `scripts/net_probe.py` 探测唯一真源（TTL 进程内+磁盘缓存、幂等、并发、fail-safe）；
+   engine_router/search_engine_health 重复 probe_http 收口为委托。
+2. registry.yaml：12 能力补 requires_hosts + network_boundary；新增 WikiVerify/L4Transcribe/
+   PatentLookup 三能力；network_boundaries 11-host 台账；core 访问器 + 内嵌默认同步。
+3. `scripts/boundary_gate.py`：静态声明校验/实测可达/执行前 preflight（默认 OFF、fail-open）。
+4. `references/network-boundary-report.md`：沙箱受限清单（目标机可重刷对照）。
+5. `capability_compensator` 边界预检：不可达沿 degrade_to 显式降级 + boundary_restricted 留痕。
 
-发布包内含 **7 个生态的安装/注册产物**（`dist/`）：
+## 兼容性
 
-| 生态 | 形态 | 状态 |
-|---|---|---|
-| **WorkBuddy** | 本地 SKILL 包 | ✅ 直接可用 |
-| **ima.copilot** | 注册清单（stdio） | ✅ 按平台规范提交注册 |
-| **Claude Desktop** | mcp.json（stdio 本地 + SSE 远程） | ✅ 直接可用 |
-| **通用 MCP** | 平台无关配置 | ✅ 任意 MCP 客户端可直连 |
-| **Dify** | 插件包（Manifest + Python 实现 + 图标/隐私） | ✅ 结构对齐，待平台导入核验 |
-| **Coze** | PluginManifest + OpenAPI 操作 | ✅ 结构对齐，待平台导入核验 |
-| **Codex / 工作流 / 插件** | 同 MCP 通用配置 | ✅ 直连 |
+- 矛盾评分老字段与 score→severity 主映射保留；GA11 仅新增字段，短句/极性对立判定零回归。
+- GA12 门控默认关闭，未设置 `INFOSEEK_BOUNDARY_GATE=1` 时对现有抓取/代偿路径零影响。
+- 无新增硬依赖（GA11-B 为 opt-in，复用既有 llm_router）。
 
-## MCP 工具面（15 规范 + 12 兼容并存）
+## 验证
 
-| 类别 | 工具 |
-|---|---|
-| **研究核心（2）** | `research_v3`, `research_stream` |
-| **异步工具（11）** | `search_anchors_async`, `fetch_content_async`, `save_archive_async`, `check_dedup_async`, `dedup_stats_async`, `fuse_analysis_async`, `cross_subject_analysis_async`, `summarize_content_async`, `conflict_detection_async`, `score_source_async`, `score_contradiction_async` |
-| **Key 管理（2）** | `manage_keys`（list/stat/rotate/revoke，脱敏）, `key_usage`（用量成本报表） |
-| **REST 桥** | `POST /tools/<tool_name>`（Bearer 鉴权）—— Coze / Dify 按 OpenAPI 导入 |
-| **兼容并存期（12）** | 11 个 sync + `research`（附 `deprecated: true` + `migrate_to`） |
-
-## 传输与托管
-
-- **stdio**（本地首选）｜**SSE+token**（远程一级部署）｜**HTTP**（平台兼容）
-- 远程托管 CLI：`python scripts/infoseek_host.py start [--port] [--host] [--token]`（脱离父进程组 + 健康检查 + token 鉴权）
-
-## 质量门控
-
-- 全量回归：**25/25 套件 PASS**（`python tests/run_tests.py`，脚本风格勿用 pytest）
-- 质量基线：`dist/quality_baseline.json`（v1.2.0，26/26 all_ok）
-- 符号自检：`python scripts/mcp_tools_check.py` → 9 模块 ALL OK
-- 泄漏扫描：`python scripts/leak_scan.py`（发布前 0 命中）
-- perf 基准：`dist/perf_baseline_v101.json`（10k 源单轮实测；多轮 P50/P95 见 ROADMAP 待办）
+- 新增守护：`tests/test_ga11_slots_v200.py`（38）+ `tests/test_ga12_boundary_v200.py`（36）。
+- 全量回归：59 套件 59 PASS / 0 FAIL / 0 SKIP / 0 TIMEOUT（90.0s）。
 
 ---
 
-## v1.4.1（2026-08-30）— P0/P1 能力增强（能力路由中枢）
+# Infoseek v1.9.0 发布说明
 
-> 定位：在 v1.4.0 能力治理收口基础上，落地「能力路由中枢」蓝图第一阶段（P0/P1），
-> 从「搜索引擎为中心」升级为「多路数据源按 意图×成本×健康 动态路由」。
+> 发布日期：2026-09-14 ｜ 版本：1.9.0（GA9 人名消歧五步 + GA10 跨语言别名桥接）｜ 许可证：MIT
+> 前置：v1.8.4（GA5 分词单源化）→ v1.8.3（§8.4 三链路口径一致性）→ v1.8.2（遗留 4 缺口闭合）
 
-### 新增能力
+## 一句话总结
 
-| 能力 | 模块 | 说明 |
-|---|---|---|
-| public-apis 免费目录 | `scripts/public_apis_catalog.py` | README→本地 JSON 索引（1712 条/51 分类/799 无 key），L0 免费优先层 |
-| 账号人因验证 | `scripts/account_trust_scorer.py` | 四维评分→real/bot/suspicious/unknown，纯规则零依赖，consent 闸控 |
-| 三级路由 | `scripts/tiered_router.py` | 意图识别→L0 免费→L1 网关→L2 专用→人工核实 |
-| AgentKey 网关适配 | `ecosystem/adapters/agentkey.py` | MCP 骨架（金融优先/社交默认 OFF），mcp 缺失优雅降级 |
-| 注册表 v2 | `capabilities/registry.yaml` | 新增 kind `free_api`/`gateway_api`，7 能力双源一致 |
+**P2 人物调研补强落地**：闭合 ROADMAP §8.12.2 **GA9**（人名消歧五步：多音字姓氏白名单 →
+复姓整词长匹配 → heteronym 全读音枚举 → person 实体族动态注册 → 拼音别名接 `_expand_query`）
+与 **GA10**（跨语言别名桥接，修复 D1 英文源系统性低估）。实测 D1 实锤场景
+`ualberta.ca` 官方一手源由 **9 分 ❌噪声 → 55 分 🟡潜力**；D2 场景英文源经拉丁拼音别名
+命中中文人名实体（`Linjian Xiang` → 项林坚），人物调研融合链不再空转。
 
-### 修复与质量
+## v1.9.0 核心改动
 
-- ZD3 关键词提取回归修复（min_count 空回退）
-- 新增 17 用例，全量回归 29/29 PASS
+1. **GA9① 数据真源** `references/person-surnames.json`：单姓 245 / 复姓 68（含 4 字复姓）/
+   多音字姓氏 26（preferred + heteronym）/ 误报防护词 662 + 地名 47 + 地名后缀 56 + 虚词 143。
+2. **GA9②③ 检测与别名** `core/person_ner.py`：复姓整词长匹配（禁逐字拆）；text/subject 双层模式
+   （精度/召回分层）；姓氏多音字全枚举 + 名连写英文化（`xiang linjian` / `linjian xiang`）；
+   五重守卫（虚词 / 常用词 jieba-FREQ / 地名后缀 / blocklist / 叠字）。
+3. **GA9④ D2 闭合**：`bootstrap_subject()` 把人名注册进 person 实体族（运行时会话级），
+   NER 对中文源按 `name` 命中、对英文源按注册别名（拉丁拼写）命中；冲突检测/图谱可按人名索引。
+4. **GA9⑤ + GA10 桥接** `core/xling_bridge.py`：subject 的人名拼音别名组 + 词典实体拉丁别名组
+   构成跨语言桥接；`score_source` fallback 与 `_filter_relevant` 双闸门命中即保底 55（多组至 70）；
+   区分度守卫（常见英文词 blocklist）防误抬；env `INFOSEEK_XLING_BRIDGE` 可关。
+5. **召回扩展**：`_expand_query` 追加拼音别名（与词典别名去重），提升英文源召回面。
+6. **守护测试**：`test_ga9_person_v190`（40 断言）+ `test_ga10_xling_v190`（29 断言），
+   含导入纪律 AST 守护（固化「禁 from-import」永久约束）。
 
----
+## 零回归契约
 
-## 历史版本摘要
+| 项 | 保证 |
+|----|------|
+| 既有命中路径 | 桥接为 `max()` 抬底语义——原 Jaccard/containment 命中不受影响 |
+| 中文×中文 | `xling_bridge=0`，env on/off 分数**恒等**（B3 断言） |
+| algo-v 契约 | `score_source` 返回体 `version` 保持 **1.2.0**；仅新增 `xling_bridge` 字段 |
+| RE1/RE2/RE3 | `_expand_query` 既有契约全保（BYD 扩展 / 无命中原样 / 异常防御） |
+| 导入纪律 | `_anchor_mod`/`_person_mod`/`_xling_mod` 模块对象晚绑定，禁 from-import（AST 守护） |
 
+## 升级注意
 
+- **新增可选依赖** `pypinyin>=0.55`：未安装时检测/注册仍工作，拼音别名降级为空 +
+  一次性告警（不阻断主链路）。
+- env 开关：`INFOSEEK_XLING_BRIDGE`（默认开）/ `INFOSEEK_PERSON_NER`（默认开）；
+  关闭后完全回退 v1.8.4 行为。
+- 人名注册默认**会话级内存态**（零文件写入，无跨会话噪声累积）；需持久化可显式
+  `register_person_runtime(..., persist=True)` 走 `learn_entity` 通道。
 
-### v1.4.0（2026-08-26）— 能力治理收口 + 跨平台安装
-- **统一外部能力注册表**（`capabilities/registry.yaml` + `core/capability_registry.py`）：声明式 name/kind/enabled(default_off)/requires_consent/degrade_to/health_probe；函数 `is_enabled/is_effective_enabled/requires_consent/degrade_chain/grant_consent/consent_granted`，模块级 `_cache`
-- **代偿层**（`scripts/capability_compensator.py`）：`compensate(cap, handlers, *args)` 返回 `CompensateResult(used, trail, result, gap_flag)`，消费 `degrade_to` 链
-- **合规闸**（`core/capability_errors.py`）：`ConsentRequired` / `CapabilityUnavailable`；`maigret_client.search()` / `sherlock_client.search()` 上抛 ConsentRequired，pipeline 捕获降级返回 []
-- **Maigret / Sherlock 客户端**（`scripts/maigret_client.py` / `scripts/sherlock_client.py`）：懒加载 CLI（兼容 `.exe`），`search(username, consent=False)` 默认关闭、双闸口（env `INFOSEEK_ENABLE_IDENTITY_ATTRIBUTION` + consent）上抛 ConsentRequired
-- **pipeline 身份归因入口**（`scripts/infoseek_pipeline.py::search_identity_attribution`）：默认 []，仅显式授权后返回
-- **PRIVACY.md** 追加身份归因 OSINT 守则 + 审计
-- **跨平台安装器** `install.sh`（POSIX：Linux/macOS/Windows-Git-Bash）：复制到 `~/.workbuddy/skills/infoseek`、可选建隔离 venv 装依赖、可选装 maigret/sherlock、校验可加载
-- **升级路径** 收口至 `references/ROADMAP.md`（M 系列里程碑 + 待办 + M1.x 路线）
-- 测试：`test_capability_registry_v100.py`（19 PASS）、`test_identity_clients_v100.py`（10 PASS）；全量回归基线 25/25 套件 PASS 维持
-- 纯净包 `infoseek-v1.4-clean.zip`：排除 `__pycache__/outputs/dist/_user_meta.json/_REGISTER_STATUS.md`，零真实密钥（leak_scan 8 告警均为测试夹具/演示占位，已确证）
+## 剩余路线
 
-### v1.3（2026-08-25）— QVeris 能力路由接入
-- 新模块 `scripts/qveris_client.py`：零依赖（urllib）直连 QVeris REST API（discover/inspect/probe/call），接入搜索链 AI 键控层（`_ENGINE_WEIGHT` 0.9，`_KEY_ENV` 映射 `QVERIS_API_KEY`）
-- **双端点自动选区**：`sk-cn-` 前缀 key 自动走 `https://qveris.cn/api/v1`（CN 合规区），其余走 `https://qveris.ai/api/v1`；`INFOSEEK_QVERIS_BASE_URL` 可强制覆盖
-- **Discover→Inspect→Call 契约**：CN 端点 discover 返回精简结构（tool_id/capability/cost_class/reliability），客户端自动补 inspect 获取 name/examples.sample_parameters/provider_name，再预算内 call（credits 保护，`INFOSEEK_QVERIS_CALL_BUDGET`）
-- 错误分类 429→quota / 401/403→forbidden 自动进入引擎生命周期（零改动复用 `engine_lifecycle.classify`）
-- **真实凭据验证通过**：CN 端点 discover（免费）→ inspect（免费）→ call（1 credits/结果，余额 999/1000），返回真实 A 股市场宽度结构化数据
-- 新测试 `tests/test_qveris_bridge_v130.py`（33 断言：端点选区 / 无 key 降级 / mock 全流程 / 429/401 上抛 / 失败跳过 / search_id 透传 / pipeline 集成）
-
-### v1.0.1（2026-08-20）
-- 全维度审计 G1–G13 全闭环（subprocess 硬编码 / 权限 / 路径穿越 / L2 抓取 / LLM 路径 / 测试 / 生态 / env 文档 / 死代码 / 模块拆分 / 工具收敛 / 基线）
-- ABC 能力增强：QCM 跨 skill 协同、AST 符号自检、Keyring 后端、token 成本折算、CLI backup/restore、perf 基准、引擎健康探测
-- 搜索引擎生命周期 P0–P3：错误分类状态机 / 配额追踪 / 能力路由 + 新鲜度自愈
-
-### v1.0.0（2026-08-19）
-- 首个发布版本：工具面收敛（25→13 规范）、搜索引擎降级链重写（DDG HTML / Bing RSS / Wikipedia 真实结果）、4 维评分门控、矛盾检测、实体图谱、结构化报告、本地持久化（`~/.infoseek`）、零依赖核心
-
----
-
-## 安装与快速开始
-
-```bash
-# 依赖（核心 + 文本分析 + 可选 LLM）
-pip install -r requirements.txt
-# 可选：浏览器抓取（L2/L3）
-pip install -r requirements-extra.txt
-
-# 本地 MCP（stdio）
-python scripts/infoseek_mcp_server.py
-# 远程 SSE 托管
-python scripts/infoseek_host.py start --port 8765
-```
-
-完整依赖与 API Key 配置见 `references/external-deps.md` / `references/api-keys.md`。
+- **P3 / v2.x**：GA11 段落级事实槽重构（`contradiction_scorer` 长叙述句召回近零）、
+  GA12 目标机闭环（沙箱网络边界受限项）。
 
 ---
 
-## 已知限制（如实声明）
+# Infoseek v1.8.4 发布说明
 
-- **运行时托管需 Python 环境**：Coze / Claude SSE / Dify 云端调用需先 `infoseek_host.py start`；stdio 形态完全本地
-- **L4 转录默认占位**：whisper 为可选依赖，未安装时仅返回多媒体元信息（`transcript_available=False`）
-- **实体库为进程内状态**：实体元数据跨进程不持久化（FreshnessCron 验证结果以统计返回）；持久层已列入 ROADMAP 待办
-- **perf 多轮 P50/P95**：10k 单轮数据已入基线；多轮采样留作后续（ROADMAP P1）
-- **Dify 插件需 `dify_plugin` SDK** 调试（生产环境无此依赖）
+> 发布日期：2026-09-13 ｜ 版本：1.8.4（GA5 分词单源化 + 局部 import 收口）｜ 许可证：MIT
+> 前置：v1.8.3（§8.4 三链路口径一致性闭合）→ v1.8.2（遗留 4 缺口闭合）→ v1.8.1（版本号单源化治理）
 
-## 路线图
+## 一句话总结
 
-详见 `references/ROADMAP.md`（历史脉络 · 待办 · 前景方向）。近期：perf 多轮基准 / 实体持久层 / L3 真实凭证冒烟；中期（v2.x）：召回深化 / 转录落地 / 多模态起步。
+**P1 治理收口**：闭合 ROADMAP §8.12.2 最后一个 P1 余项 **GA5「分词单源化」**——把
+`anchor_adapter._tokenize_subject` 与 `infoseek_pipeline._tokenize_query` 两份并存的同构分词
+实现抽为唯一真源 `scripts/text_tokenizer.py::tokenize_text()`，两侧退化为薄封装委托；连带收口
+§8.12.4 点名的 `infoseek_pipeline.py:996-999`（函数体内 `sys.path.insert` + 局部 import）。
+18 样本旧↔新**零差异**对拍，全量回归 **55 PASS / 0 FAIL（90.1s）**。
 
----
+## v1.8.4 核心改动
 
-## 致谢
+1. **唯一分词真源**：新增 `text_tokenizer.tokenize_text(text, require_chinese=False,
+   warn_on_fallback=False)`——jieba 优先（探测进程内缓存，避免热路径重复 try-import）→ 缺失
+   回退纯 Python（中文连续段 ≤4 字整段 / >4 字滑窗 2-gram；英数 ≥2 字符整词；小写归一）。
+   零 infoseek 内部依赖 → 天然无循环依赖，原「独立实现避免循环依赖」的理由消解。
+2. **两侧退化委托**：`_tokenize_subject` 33 行 / `_tokenize_query` 32 行算法体各收敛为一句
+   `return tokenize_text(...)`；保留函数名（兼容 `_string_containment_similarity` 调用点与
+   `test_relevance_gate_v177` 断言）；`_RELEVANCE_WARNED` 移除（一次性告警迁真源）。
+3. **有意差异显式参数化**：`require_chinese=True`（query 侧）——纯英文/数字 → 空集，服务
+   `_filter_relevant`「中文多字词硬门槛」；subject 侧无门控（处理任意语言）。这是**唯一**
+   保留差异，已由 G9/G10 断言锁定「含中文样本分叉恒为 0」。
+4. **局部 import 收口**：删原 996-999 每次调用的 `sys.path.insert` + 局部 import → 顶层
+   `import anchor_adapter as _anchor_mod` + 属性访问；300 次调用实测 `sys.path` **Δ=0**
+   （原 +300，与 GA8 已治的 O(n²) 隐患同源）。
+5. **新增守护测试**：`tests/test_ga5_tokenizer_v184.py`（170 行 / **24 断言**，6 组），含
+   **G23/G24 mock 可patch性**——把本轮踩到的隐性契约固化为断言。
 
-- 上游 **infoseek** 项目（expeditionhub/infoseek）奠定的核心架构
-- 各依赖库的开发者（duckduckgo / Bing / Wikipedia / MCP 生态）
-- 所有早期内测与反馈者
+## 本轮最大教训：from-import 早绑定击穿 mock 契约
 
-## 反馈与贡献
+首次收口用顶层 `from anchor_adapter import compute_semantic_similarity,
+_string_containment_similarity`，全量回归**击穿 3 套件 9 项断言**
+（`test_p1p3p2_fixes` 12/15、`test_recall_enhance_v101` 13/16、`test_relevance_gate_v177` 9/12，
+含 C2 `calls=0`）。
 
-- Issues / Discussions：按平台选择
-- 许可证：MIT（详见 `LICENSE`）
+- **根因**：from-import 在导入期把函数对象**固化**进 pipeline 命名空间（早绑定）；测试替换的是
+  `anchor_adapter` 的**模块属性**，晚替换无效。原「函数体内局部 import」虽是性能反模式，却每次
+  重新取属性（晚绑定）——这是既有测试依赖的隐性契约，不只是路径注入。
+- **修法**：模块对象 + 属性访问（调用时求值）→ patch 恢复生效，同时 `sys.path` 不膨胀。
+- **铁律**：收口局部 import 时，若被导入对象存在 mock/monkey-patch 契约，必须用模块对象属性
+  访问；**全量回归是唯一判据**（单套件自测发现不了）。
 
----
+## 验收
 
-**Infoseek v1.2.0 — 让每一次调研都更可靠。**
+| 项 | 结果 |
+|----|------|
+| 行为等价 | 备份 exec 旧实现，18 样本旧↔新**零差异**（含中/英/混排/空/单字/全角/标点） |
+| 分叉口径 | 旧 3 == 新 3，全为纯英文/数字样本（有意门控 A）；含中文分叉 **0** |
+| sys.path | 300 次调用 **Δ=0**（原 +300） |
+| AST 收口 | `_filter_relevant` 体内 Import/ImportFrom/path.insert 节点 **0 命中** |
+| 守护测试 | `test_ga5_tokenizer_v184` **24 PASS / 0 FAIL** |
+| 全量回归 | **55 PASS / 0 FAIL / 0 SKIP / 0 TIMEOUT / 0 KNOWN，90.1s** |
+| 版本联动 | SKILL.md / mcp_tools_common.SKILL_VERSION / core.__version__ / manifest.yaml 四处 1.8.4 |
+
+## 升级注意
+
+- **行为零变更**：本版为等价重构，评分/门控/召回口径均不变，无需调整任何调用方或 env。
+- 若你在外部代码里 patch 过 `anchor_adapter` 的相似度函数，**继续可用**（G23/G24 已守护）；
+  但请勿把 pipeline 顶层的 `import anchor_adapter as _anchor_mod` 改回 from-import。
+- jieba 仍为可选依赖：未安装时自动回退纯 Python 并发一次性 WARNING（精度下降，建议安装）。
+
+## 剩余路线
+
+- **P2 / v1.9.0**：GA9 人名消歧五步（多音字白名单 → 整词长匹配 → heteronym 枚举 → person
+  实体族 → 拼音别名接 `_expand_query`）、GA10 跨语言别名桥接（英文一手源被中文 query 系统性低估）。
+  **P1 5/5 全闭合 → P2 启动条件已满足**。
+- **P3 / v2.x**：GA11 段落级事实槽重构、GA12 目标机闭环（沙箱网络边界受限）。
