@@ -16,7 +16,10 @@ domains:
                "大模型", "人工智能", "深度学习", "机器学习", "训练", "推理",
                "framework", "open source", "software", "algorithm", "chip",
                "architecture", "deep learning", "machine learning", "llm",
-               "training", "inference", "api", "模型", "微调", "部署"]
+               "training", "inference", "api", "模型", "微调", "部署",
+               # P0-OPEN-05：AI 产品/实体词（修「GPT-5」路由返回 None）
+               "gpt", "gpt5", "gpt-5", "chatgpt", "openai", "claude", "gemini",
+               "agent", "智能体", "aigc", "生成式"]
 
   market-research:
     weight: 1.0

@@ -511,6 +511,145 @@ def keyed_score(claim_a: Dict, claim_b: Dict, text_a: str, text_b: str) -> dict:
 # 否定 / 反义检测
 # ═══════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════
+# P0-OPEN-06：时间事实槽（年月/季度 → ISO 区间比对）
+#   独立于 aspect 关键词命中：直接从全文解析时间表达式，归一为 [start,end)
+#   ISO 日期区间，区间不相交即时间冲突。解决「2023Q1 发布 ↔ 2024Q3 发布」
+#   这类时间事实矛盾此前无法被键控槽捕获的问题。
+# ═══════════════════════════════════════════════════════════
+
+# 季度中文名 / 数字 / 英文缩写 → 1-4
+_QUARTER_CN = {'一': 1, '二': 2, '三': 3, '四': 4, '1': 1, '2': 2,
+               '3': 3, '4': 4}
+_MONTH_CN = {'一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6,
+             '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12}
+_EN_MONTHS = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+              'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11,
+              'dec': 12}
+
+
+def _q_span(year: int, q: int):
+    m0 = (q - 1) * 3 + 1
+    if m0 > 9:
+        return f'{year:04d}-{m0:02d}-01', f'{year + 1:04d}-01-01'
+    return f'{year:04d}-{m0:02d}-01', f'{year:04d}-{m0 + 3:02d}-01'
+
+
+def _m_span(year: int, m: int):
+    if m == 12:
+        return f'{year:04d}-12-01', f'{year + 1:04d}-01-01'
+    return f'{year:04d}-{m:02d}-01', f'{year:04d}-{m + 1:02d}-01'
+
+
+def _parse_time_spans(text: str) -> List[Dict[str, str]]:
+    """从文本抽取时间表达式 → ISO [start,end) 区间列表。
+
+    支持：2024年Q1 / 2024 第一季度 / 2024Q1 / Q1 2024 /
+          2024年3月 / 2024-03 / 2024/3 / March 2024 / 2024年三月 / 单独年份。
+    年月/季度精确到月/季；单独 4 位年作全年区间（粒度粗，冲突判定宽松）。
+    """
+    if not text:
+        return []
+    t = text[:_KEYED_MAX_CHARS]
+    spans: List[Dict[str, str]] = []
+    seen = set()
+
+    def _add(label, s, e):
+        k = (label, s, e)
+        if k not in seen:
+            seen.add(k)
+            spans.append({'label': label, 'start': s, 'end': e})
+
+    # 1) 年+季度：2024年Q1 / 2024Q1 / 2024 第一季度 / 2024 q3
+    for m in re.finditer(
+            r'(20\d{2})\s*年?\s*(?:q\s*([1-4])|第\s*([一二三四1-4])\s*季度)',
+            t, re.IGNORECASE):
+        y = int(m.group(1))
+        if m.group(2):
+            q = int(m.group(2))
+        else:
+            q = _QUARTER_CN[m.group(3)]
+        s, e = _q_span(y, q)
+        _add(f'{y}年Q{q}', s, e)
+    # Q1 2024 / Q1'24（季度在前）
+    for m in re.finditer(r'q\s*([1-4])\s*[\'’]?\s*(20\d{2})', t, re.IGNORECASE):
+        q, y = int(m.group(1)), int(m.group(2))
+        s, e = _q_span(y, q)
+        _add(f'{y}年Q{q}', s, e)
+
+    # 2) 年+月（数字）：2024年3月 / 2024-03 / 2024/3 / 2024.03
+    for m in re.finditer(r'(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*月?', t):
+        y, mo = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12:
+            s, e = _m_span(y, mo)
+            _add(f'{y}年{mo}月', s, e)
+    # 中文月：2024年三月 / 2024年十一月
+    for m in re.finditer(r'(20\d{2})\s*年\s*(十一|十二|十|[一二三四五六七八九])月', t):
+        y, mo = int(m.group(1)), _MONTH_CN[m.group(2)]
+        s, e = _m_span(y, mo)
+        _add(f'{y}年{mo}月', s, e)
+    # 英文月：March 2024 / Mar 2024
+    for m in re.finditer(
+            r'(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+(20\d{2})',
+            t, re.IGNORECASE):
+        mo, y = _EN_MONTHS[m.group(1).lower()], int(m.group(2))
+        s, e = _m_span(y, mo)
+        _add(f'{y}年{mo}月', s, e)
+
+    # 3) 单独年份（全年粒度）：已被更精确季/月覆盖的年不再重复添加
+    precise_years = {int(sp['label'][:4]) for sp in spans}
+    for m in re.finditer(r'(?<![\d/.\-])(20\d{2})(?![\d/.\-])', t):
+        y = int(m.group(1))
+        if y in precise_years:
+            continue
+        _add(f'{y}年', f'{y:04d}-01-01', f'{y + 1:04d}-01-01')
+
+    return spans
+
+
+def _spans_overlap(sa: Dict, sb: Dict) -> bool:
+    """两个 ISO [start,end) 区间是否相交（端点相接不算重叠）。"""
+    return sa['start'] < sb['end'] and sb['start'] < sa['end']
+
+
+def time_slot_score(text_a: str, text_b: str) -> Dict:
+    """P0-OPEN-06：时间事实槽比对。
+
+    返回 {score, conflict, time_slots_a, time_slots_b, reasons, coverage}。
+      coverage:
+        'both_timed' 两条都抽到时间（已评估，可对拍）
+        'partial'    仅一条有时间（无法对拍 → 未评估）
+        'neither'    两条都无时间（未评估）
+      conflict=True 仅当双方都有时间且区间两两不相交（同一主体时间矛盾）。
+    冲突分：精确粒度（季/月）60（high 边界）；仅全年粗粒度 35（medium，容忍跨年口径）。
+    """
+    ta = _parse_time_spans(text_a)
+    tb = _parse_time_spans(text_b)
+    if not ta and not tb:
+        coverage = 'neither'
+    elif ta and tb:
+        coverage = 'both_timed'
+    else:
+        coverage = 'partial'
+
+    if coverage != 'both_timed':
+        return {'score': 0, 'conflict': False, 'time_slots_a': ta,
+                'time_slots_b': tb, 'reasons': [], 'coverage': coverage}
+
+    if any(_spans_overlap(a, b) for a in ta for b in tb):
+        return {'score': 0, 'conflict': False, 'time_slots_a': ta,
+                'time_slots_b': tb, 'reasons': [], 'coverage': coverage}
+
+    coarse = all('Q' not in s['label'] and '月' not in s['label']
+                 for s in ta + tb)
+    score = 35 if coarse else 60
+    la = ' / '.join(s['label'] for s in ta)
+    lb = ' / '.join(s['label'] for s in tb)
+    return {'score': score, 'conflict': True, 'time_slots_a': ta,
+            'time_slots_b': tb, 'coverage': coverage,
+            'reasons': [f'时间事实冲突：[{la}] ↔ [{lb}]（时间区间不相交）']}
+
+
 # GA11：否定误报豁免——这些短语中的「不/未」表"恒定/达成"而非否定对立
 NEG_EXEMPT = {
     "持平", "不变", "基本持平", "保持不变", "维持不变", "稳定", "不止",
@@ -597,8 +736,15 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
           可选 'entity'/'subject' 提供键控主体（缺省两条默认同一对比对象）。
     返回: {'score': 0-100, 'severity': ..., 'reasons', 'neg_hits',
            'shared_slots', 'slot_score', 'neg_score',          # 老字段语义不变
-           'keyed_score', 'conflict_slots', 'scorer_mode'}      # GA11 新增
-    scorer_mode: 'keyed'（键控槽路主导）| 'negation'（否定/反义路主导）。
+           'keyed_score', 'conflict_slots', 'scorer_mode',     # GA11 新增
+           'time_score', 'time_slots_a', 'time_slots_b',      # P0-OPEN-06 时间槽
+           'time_coverage', 'verdict'}                          # P0-OPEN-06 判定/覆盖率
+    scorer_mode: 'keyed'（键控槽路主导）| 'negation'（否定/反义路主导）
+                 | 'time'（P0-OPEN-06 时间事实槽主导）。
+    verdict（P0-OPEN-06）:
+        'conflict'          检出矛盾（score>0）
+        'no_conflict'       已充分评估（双方都有可对拍事实槽）且未发现冲突
+        'not_assessable'    未评估——双方均缺可对拍事实槽（无时间/无键控槽/无共享槽）
     """
     text_a = claim_a.get('text', '') if isinstance(claim_a, dict) else str(claim_a)
     text_b = claim_b.get('text', '') if isinstance(claim_b, dict) else str(claim_b)
@@ -614,17 +760,50 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
                             text_a, text_b)
         keyed_score_val = keyed['score']
     except Exception:
-        keyed = {'conflict_slots': [], 'reasons': []}
+        keyed = {'conflict_slots': [], 'reasons': [],
+                 'slots_a': {}, 'slots_b': {}}
+    # 路 3：P0-OPEN-06 时间事实槽（年月/季度 → ISO 区间比对）
+    # 容错：时间解析依赖正则，任何异常（如外部 mock re）都不得击穿主评分，
+    # 降级为"未评估"，与 keyed 路的健壮性契约一致（L3-05 守护）。
+    try:
+        tslot = time_slot_score(text_a, text_b)
+        time_score_val = tslot['score']
+    except Exception:
+        tslot = {'score': 0, 'reasons': [], 'coverage': 'neither',
+                 'time_slots_a': [], 'time_slots_b': [], 'conflict': False}
+        time_score_val = 0
 
-    # max 融合：两路证据取强，不叠加（避免同义复述被相似度抬分）
-    if keyed_score_val >= legacy['score']:
-        total = keyed_score_val
-        mode = 'keyed'
-        reasons = legacy['reasons'] + keyed.get('reasons', [])
+    # max 融合：三路证据取强，不叠加（避免同义复述被相似度抬分）
+    trio = [
+        (keyed_score_val, 'keyed', keyed.get('reasons', [])),
+        (legacy['score'], 'negation', legacy['reasons']),
+        (time_score_val, 'time', tslot['reasons']),
+    ]
+    trio.sort(key=lambda x: -x[0])
+    total = trio[0][0]
+    mode = trio[0][1]
+    # reasons 汇聚所有命中证据路（主导路在前）
+    reasons = list(trio[0][2])
+    for _sc, _m, _rs in trio[1:]:
+        if _sc > 0:
+            reasons.extend(_rs)
+
+    # ── P0-OPEN-06：无冲突 / 未评估 区分（覆盖率）──
+    # 可对拍事实槽覆盖：键控槽交集（同主体同方面）、时间双侧、legacy 共享槽。
+    sa = keyed.get('slots_a', {}) or {}
+    sb = keyed.get('slots_b', {}) or {}
+    shared_keyed = bool(set(sa) & set(sb))
+    both_timed = tslot['coverage'] == 'both_timed'
+    # legacy 的 shared_slots 是 2-gram 短语袋，长文本极易偶然共享，
+    # 仅在其相似度真正贡献了非平凡槽分（≥2 个共享槽）时才视为"可对拍"。
+    legacy_assessable = legacy.get('slot_score', 0) >= 2
+    assessable = shared_keyed or both_timed or legacy_assessable
+    if total > 0:
+        verdict = 'conflict'
+    elif assessable:
+        verdict = 'no_conflict'
     else:
-        total = legacy['score']
-        mode = 'negation'
-        reasons = legacy['reasons']
+        verdict = 'not_assessable'
 
     return {
         'score': total,
@@ -638,6 +817,13 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
         'keyed_score': keyed_score_val,
         'conflict_slots': keyed.get('conflict_slots', []),
         'scorer_mode': mode,
+        # P0-OPEN-06 时间事实槽 + 判定/覆盖率
+        'time_score': time_score_val,
+        'time_slots_a': tslot['time_slots_a'],
+        'time_slots_b': tslot['time_slots_b'],
+        'time_coverage': tslot['coverage'],
+        'assessable': assessable,
+        'verdict': verdict,
     }
 
 

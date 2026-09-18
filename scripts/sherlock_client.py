@@ -7,16 +7,36 @@ Sherlock（sherlock-project）：用户名 → 平台存在性快速枚举（~40
 与 Maigret 同族（identity_attribution），经注册表 degrade_to 形成替代链。
 
 设计同 maigret_client：默认 OFF + 合规闸 + subprocess CLI + 错误分类复用 lifecycle。
+
+────────────────────────────────────────────────────────────────────────
+CLI 契约（sherlock-project v0.16.x 实测，2026-09-18 沙箱实证）
+────────────────────────────────────────────────────────────────────────
+旧实现把 ``sherlock <user> --json`` 当作"JSON 打到 stdout"，**三处全错**：
+  1. ``--json FILE`` 是「站点数据输入文件/在线 data.json」，不是结果输出开关；
+  2. Sherlock **不产出 JSON 结果文件**，结果只有 txt / csv / xlsx；
+  3. stdout 是人类可读文本（进度条 + [+] 行），不是 JSON。
+
+正确契约（本模块采用）：
+  sherlock <user> --csv --print-found --timeout N [--tor]
+    - ``--csv``            在工作目录写 ``<user>.csv``（列：
+                           username,name,url_main,url_user,exists,
+                           http_status,response_time_s）
+    - ``--print-found``    CSV 只保留命中行（exists=Claimed），并在 stdout 打印
+    - ``-o/--output``      仅配合 --txt，且单用户名；csv 固定文件名 <user>.csv
+    - QueryStatus：Claimed（命中）/ Available（未命中）/ Unknown / Illegal / WAF
+本模块在临时工作目录运行，结束后读回唯一 *.csv，不依赖 <user> 文件名合法性。
 """
 
 from __future__ import annotations
 
-import json
+import csv
+import io
 import logging
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from typing import Dict, List
 
 log = logging.getLogger("infoseek.sherlock")
@@ -37,6 +57,15 @@ except ImportError:
 
 CAP_NAME = "Sherlock"
 
+# exists 列 → 是否纳入 + 置信度（仅 Claimed 为真实命中）
+_STATUS_MAP = {
+    "Claimed": (True, 0.85),
+    "Available": (False, 0.4),    # 未命中（--print-found 已过滤，防御性保留）
+    "Unknown": (False, 0.0),
+    "Illegal": (False, 0.0),
+    "WAF": (False, 0.0),
+}
+
 
 def _resolve_cli() -> List[str]:
     """定位 sherlock 可执行：PATH → 隔离 venv（INFOSEEK_SHERLOCK_VENV）。
@@ -56,7 +85,7 @@ def _resolve_cli() -> List[str]:
                 return [str(cand)]
         py = scripts / ("python.exe" if sys.platform == "win32" else "python")
         if py.exists():
-            return [str(py), "-m", "sherlock"]
+            return [str(py), "-m", "sherlock_project"]
     return ["sherlock"]
 
 
@@ -74,8 +103,10 @@ def search(username: str,
            tor: bool = False) -> List[Dict]:
     """对公开用户名做存在性快速枚举（默认不递归、低开销）。
 
-    返回账号列表：{platform, url, username, confidence, source}
-    未启用 / 未授权 / CLI 缺失 → 返回 []（安全降级）
+    返回账号列表：{platform, url, username, fullname, site_rank,
+                   http_status, confidence, source}
+    未启用 / 未授权 / CLI 缺失 → 返回 []（search_web 安全降级）或上抛
+    （直接调用时抛 CapabilityUnavailable/ConsentRequired）。
     """
     if not is_enabled(CAP_NAME):
         log.debug(f"[{CAP_NAME}] 未启用（默认 OFF），跳过")
@@ -84,50 +115,77 @@ def search(username: str,
     _consent_gate(consent)
 
     cli = _resolve_cli()
-    cmd = cli + [username, "--json"]
+    # v0.16.x 契约：--csv 在 cwd 写 <user>.csv；--print-found 仅保留命中；
+    # 站点数据输入 --json 绝不能误用。临时目录隔离产物。
+    cmd = cli + [username, "--csv", "--print-found", "--timeout", str(max(5, int(timeout)))]
     if tor:
         cmd.append("--tor")
 
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except FileNotFoundError:
-        raise CapabilityUnavailable(CAP_NAME, "CLI 未安装（隔离 venv 未配置）")
-    except subprocess.TimeoutExpired:
-        raise CapabilityError(f"{CAP_NAME} 超时（>{timeout}s）", code=0)
-    except Exception as e:
-        raise CapabilityError(f"{CAP_NAME} 执行异常: {e}", code=0, cause=e)
+    with tempfile.TemporaryDirectory(prefix="infoseek_sherlock_") as workdir:
+        try:
+            proc = subprocess.run(
+                cmd, cwd=workdir, capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError:
+            raise CapabilityUnavailable(CAP_NAME, "CLI 未安装（隔离 venv 未配置）")
+        except subprocess.TimeoutExpired:
+            raise CapabilityError(f"{CAP_NAME} 超时（>{timeout}s）", code=0)
+        except Exception as e:
+            raise CapabilityError(f"{CAP_NAME} 执行异常: {e}", code=0, cause=e)
 
-    if proc.returncode != 0:
-        log.warning(f"[{CAP_NAME}] CLI 返回 {proc.returncode}: {(proc.stderr or '')[:200]}")
+        if proc.returncode != 0:
+            log.warning(f"[{CAP_NAME}] CLI 返回 {proc.returncode}: "
+                        f"{(proc.stderr or '')[:200]}")
 
-    return _parse_output(proc.stdout)
+        # csv 固定命名 <username>.csv，但 username 可能含文件系统特殊字符，
+        # 故 glob 工作目录内唯一 *.csv（一次调用只查一个用户名）。
+        import pathlib
+        csv_files = sorted(pathlib.Path(workdir).glob("*.csv"))
+        if not csv_files:
+            log.debug(f"[{CAP_NAME}] 无 CSV 产物（可能 0 命中或 CLI 异常）")
+            return []
+        text = csv_files[0].read_text(encoding="utf-8", errors="replace")
+
+    return _parse_csv(text, username)
 
 
-def _parse_output(stdout: str) -> List[Dict]:
-    if not stdout or not stdout.strip():
+def _parse_csv(text: str, queried_username: str = "") -> List[Dict]:
+    """解析 sherlock --csv 产物。
+
+    列（v0.16.x）：username,name,url_main,url_user,exists,
+                   http_status,response_time_s
+    仅纳入 exists=Claimed；username 回填为查询名（旧实现写死空串，
+    导致下游 cross_platform_matches 统计失效）。
+    """
+    if not text or not text.strip():
         return []
     out: List[Dict] = []
     try:
-        data = json.loads(stdout.strip())
-    except json.JSONDecodeError:
-        return out
-    # sherlock --json 结构：{ "username": { "site1": {"url":..., "status":"Claimed"}, ... } }
-    if isinstance(data, dict):
-        for site, info in data.items():
-            if not isinstance(info, dict):
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            if not isinstance(row, dict):
                 continue
-            status = info.get("status", "")
-            url = info.get("url", "")
-            if status in ("Claimed", "Available") and url:
-                out.append({
-                    "platform": site,
-                    "url": url,
-                    "username": "",
-                    "fullname": "",
-                    "site_rank": 0,
-                    "confidence": 0.85 if status == "Claimed" else 0.4,
-                    "source": CAP_NAME,
-                })
+            exists = (row.get("exists") or "").strip()
+            take, conf = _STATUS_MAP.get(exists, (False, 0.0))
+            url = (row.get("url_user") or "").strip()
+            if not take or not url:
+                continue
+            try:
+                http_status = int(row.get("http_status") or 0)
+            except (TypeError, ValueError):
+                http_status = 0
+            out.append({
+                "platform": (row.get("name") or "").strip(),
+                "url": url,
+                # 回填实际查询用户名（CSV 首列也带，优先用之，缺失再用入参）
+                "username": (row.get("username") or queried_username or "").strip(),
+                "fullname": "",
+                "site_rank": 0,
+                "http_status": http_status,
+                "confidence": conf,
+                "source": CAP_NAME,
+            })
+    except Exception as e:  # 结构异常不致命，返回已解析部分
+        log.warning(f"[{CAP_NAME}] CSV 解析异常: {e}")
     return out
 
 

@@ -1,5 +1,103 @@
 # Changelog
 
+## [2.1.0-openfix] - 2026-09-18（P0-OPEN-04/06/05 + P1 缺口闭合，**版本号不变**）
+
+> 用户指令：审计缺口后自主执行，**版本号保持 2.1.0 不变**（本批为缺陷修复与口径对齐，
+> 不构成对外版本 bump）。新增守护 `tests/test_open_fixes_v210.py`（60 断言）；
+> 全量回归 61 PASS / 2 SKIP（jieba/pypinyin 可选依赖缺失）/ 0 FAIL。
+
+### P0-OPEN-04 · score 量纲归一化 + 核心源为 0 禁止空骨架
+- **量纲归一化**：`score_source` 入口对入参 `score` 做 0–1 量纲检测，`0 < score <= 1`
+  自动 ×100（精确 0 仍为 empty，1→100），新增返回字段 `scale_normalized`。修复外部源传
+  0.72 被当 0.72 分（<40 噪声）静默丢弃的问题。
+- **禁止空骨架**：`domain_orchestrator.render_report` 过滤低分源时同步收集
+  `filtered_out`（含 index/title/url/platform/score/reason），区分三类原因
+  （核心源全 0 疑似评分链断裂 / 评分为 0 缺失 / 低于阈值）。核心源为 0 时报告**前置**
+  「⚠️ 无可用核心来源（评分链异常）」清单；部分滤除时文末折叠清单。返回新增
+  `filtered_count` / `filtered_out` / `all_core_zero`。
+
+### P0-OPEN-06 · 时间事实槽 + 无冲突/未评估区分
+- **时间事实槽（新增第三路）**：`contradiction_scorer.time_slot_score`，把年月/季度
+  （2024年Q1 / 2024Q1 / 2024 第一季度 / Q2 2022 / 2024年3月 / 2024-03 / 2024年十一月 /
+  March 2024 / 单独年份）解析为 ISO `[start,end)` 区间，区间不相交即时间冲突。
+  季/月粒度冲突 60（high 边界），仅全年粗粒度 35（medium，容忍跨年口径）；季度序号
+  短语（"连续3个季度"）与普通金额（"1234万元"）不误抽。
+- **三态判定 + 覆盖率**：`score_contradiction` 返回新增 `verdict`
+  （conflict / no_conflict / not_assessable）、`assessable`、`time_score`、
+  `time_slots_a/b`、`time_coverage`（both_timed / partial / neither）。
+  双侧都有可对拍事实槽且无冲突才判 no_conflict；双侧均缺槽判 not_assessable（未评估，
+  不再误报"无冲突"）。聚合层 `research` 的 `contradiction_scoring` 增加
+  `verdict_counts` / `time_coverage_counts` / `assessment_coverage`（版本 1.2.0→1.3.0）。
+- 时间槽路容错：正则异常（含外部 mock re）降级 neither，不击穿主评分（L3-05 契约）。
+
+### P0-OPEN-05 · 路由修复 + 模板按域收窄 + 跨源综合段
+- **路由修复**：实测 **GPT-5→None**（tech 词表缺 AI 产品词），补 gpt/gpt5/gpt-5/chatgpt/
+  openai/claude/gemini/agent/智能体/aigc/生成式（keyword.yaml + 内置兜底双源同步）。
+- **裸子串误判根治**：**'OpenAI Agent' 被误判 finance**，根因是 `'PE' in 'openai'`
+  （o**pe**nai）。新增 `_keyword_hit`：纯字母数字短缩写（≤4，PE/PB/RSI/KDJ）走正则
+  词边界；`gpt` 作为产品前缀允许后接版本数字（GPT4/GPT-5）但不接字母。
+- **模板按域收窄**：tech-research 模板去除钢铁硬编码（圆盘刀/钢卷/锥度张力/QC四维度），
+  改为通用技术研究（制造 + AI/软件双语义）；domains/tech-research.yaml profile 描述同步。
+- **高分源跨源综合段**：6 个模板（default+5域，templates.yaml v3.1.0→v3.2.0）统一加
+  「跨源综合」段——≥2 个评分≥70 核心源做多源交叉印证，1 个提示单源需补第二来源，
+  0 个高可信告警；并统一空源守卫（无入围源时明示）与 `filter_block` 注入位。
+
+### P1 · README 对齐 + run_tests SKIP 判定修复
+- **README 整体改写**：v1.5.0/15工具/25套件 → **v2.1.0 / 19 工具（逐一列表）/ 62 套件**；
+  补 **PYTHONPATH 用法**（scripts+core 脚本风格模块的两种配置方式）；测试矩阵改为
+  run_all.py 统一口径；版本路线/项目结构/文档导航/OSINT/四维评分/时间槽全部对齐真实实现。
+- **run_tests.py SKIP 判定修复**：旧逻辑 ①returncode==0 先短路吞掉自报 SKIP（可选依赖
+  preflight 套件 exit 0 + N SKIP 被误记 PASS）②只看 stdout 不看 stderr；现 SKIP 判定前置、
+  合并 stdout+stderr、三态 PASS/SKIP/FAIL（+TIMEOUT）归类，SKIP 单列不计失败。
+
+---
+
+## [2.1.0] - 2026-09-18（OSINT 身份归因 P0 契约修复 + 双源聚合 + 授权 UX）
+
+**bump 依据**：修正两个对外 CLI 客户端的调用/解析契约（影响 Maigret/Sherlock
+身份归因主路径，属功能性修复），并新增聚合引擎模块与授权 CLI，影响面 10%–30%，
+按版本规则更新第二位 → **2.1.0**。
+
+### P0 — 真实 CLI 契约修复（沙箱装包实测，旧实现在真实环境必然落空）
+- **sherlock_client 重写**：sherlock-project v0.16.2 实测——`--json FILE` 是站点
+  数据**输入**而非结果输出，且**无 JSON 结果文件**（仅 txt/csv/xlsx）；旧代码
+  `sherlock <user> --json` 三错。改为 `--csv --print-found` + 临时工作目录读回
+  `<user>.csv`（列 username/name/url_main/url_user/exists/http_status/...），
+  新增 `_parse_csv` 仅取 Claimed，并回填真实 username（旧实现写死空串，致下游
+  cross_platform_matches 统计失效）。
+- **maigret_client 重写**：maigret 0.6.5 实测——无 `--print-found-only/--skip-existing`，
+  `-a` 是全量站点（限站点应为 `--top-sites N`），`-J simple` 是报告**类型**且写
+  `reports/report_<user>_simple.json` 不进 stdout；真实结构为
+  `{site: {status: {status:"Claimed", url, ...}}}` 嵌套（status 是 dict）。
+  改为临时目录运行 + glob 回读 simple 报告 + `_parse_simple` 嵌套解析，
+  保留 ndjson/扁平兼容。
+- **测试脆弱性根因修复**：`test_identity_clients_v100` / `test_identity_attribution_v150`
+  / `test_capability_registry_v100` 原依赖「本机恰好未装 CLI」的环境偶然性，装了真
+  CLI 即发起真实网络扫描挂死（超时 rc=124）。统一改为注入 `_resolve_cli` 缺失路径
+  / fake subprocess 显式锁定，零网络稳定复现（固化"禁止依赖环境偶然性"教训）。
+
+### P1 — 双源聚合 + 授权 UX
+- **双源聚合去重引擎 `core/identity_aggregator.py`（新增）**：旧链路 compensate
+  只取首个成功源，Maigret 成功就不跑 Sherlock。新引擎对两源发现做平台/URL 归一化
+  去重（小写/别名/www/尾斜杠/路径）、双源交叉确认置信增强（+0.10 封顶 0.99）、
+  单源高误报平台丢弃（实测 Droners 对必不存在用户名误报 Claimed，入内置表）、
+  跨源命中复活、单源长尾/非 2xx 降档（weak 标记不删除）、CN/IN/global 粗分区统计。
+- **pipeline 接线**：`search_identity_attribution` 改为双源聚合优先
+  （`_collect_identity_multisource`），两源均空再回退原 compensate 单源代偿链；
+  锚点透传 attribution_sources/cross_source_confirmed/weak_single_source/region。
+- **能力授权 CLI `scripts/infoseek_consent_cli.py`（新增，闭合 ROADMAP P1#3 代码侧）**：
+  list/grant/revoke/shell-init/doctor，grant/revoke 复用 consent.log 审计，
+  输出 export 引导行（registry.yaml 保持只读，不改发布清单）。
+
+### 测试
+- 新增 `test_identity_aggregator_v210.py`（24 断言）、`test_consent_cli_v210.py`（16 断言）；
+  身份客户端测试扩 C6/C7 真实 CLI argv+schema 契约守护（20 断言）。
+- 全量回归 **62 PASS / 0 SKIP / 0 FAIL**（60→62 套件，91.4s）。
+
+### 仍需真实环境闭环（保留 ROADMAP）
+真实登录源凭证冒烟、真实 OSINT 样本误报阈值校准（本版误报表/阈值为规则框架，
+真实 CN/IN/全局误报率待样本标定）、Linux/macOS 安装实证。
+
 ## [2.0.0 收尾] - 2026-09-17（版本号不变，P1 旧待办销项 + ROADMAP 纯净版）
 
 **版本不 bump**：本轮为既有 P1 待办的代码级核实与最后缺口收尾 + 文档纯净版，改动幅度
@@ -363,9 +461,9 @@ mod-v（domain_router 1.8.1 / anchor_score_v2 2.0.2）、algo-v（core_v2 1.2.0�
 声明层配置化等 MINOR 级能力，按语义化版本本应抬升第二位。本次统一抬至 **1.8.1**（与
 `domain_router` mod-v1.8.1 对齐，跳过 1.8.0 以避免与历史 CHANGELOG 编号冲突）；历史条目不重写。
 
-**同步清理**：删除基于 v1.7.1 旧假设的废弃补丁 `patch_domain_router.py`（历史开发脚本）
+**同步清理**：删除基于 v1.7.1 旧假设的废弃补丁 `/sandbox/workspace/patch_domain_router.py`
 （若误执行会重复定义 `_intersect_gap()`、造成 dict 重复 key、并用内联实现替换更优的 G2 单源委托），
-已归档至开发环境的 `_deprecated_patches/` 目录留证。
+已归档至 `/sandbox/workspace/_deprecated_patches/` 留证。
 
 ### 回归口径固化（闭合审计 P1-2「口径不可复现」）
 

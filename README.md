@@ -1,41 +1,46 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v1.5.0 发布版**。
+> 端到端内容智能采集与调研工作流。**v2.1.0 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-1.5.0-blue)](#)
-[![Tests](https://img.shields.io/badge/tests-25%20suites%20PASS-success)](#)
-[![MCP](https://img.shields.io/badge/MCP-15%20tools-blueviolet)](#)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue)](#)
+[![Tests](https://img.shields.io/badge/tests-62%20suites%20green-success)](#)
+[![MCP](https://img.shields.io/badge/MCP-19%20tools-blueviolet)](#)
 
 ---
 
 ## 5 秒看懂
 
 ```python
+# scripts/ 与 core/ 不在 site-packages，需先把 scripts 加入 PYTHONPATH（见下文「安装」）
+import sys; sys.path.insert(0, "scripts")
 from infoseek_core_v2 import streaming_research
 
-# 流式研究：lite 模式 7 步 yield，秒级完成
-async for partial in streaming_research("AI", sources, lite=True):
-    print(partial["step"], "...")  # 7 步 yield
+# 流式研究：lite 模式多步 yield，秒级完成
+async for partial in streaming_research("GPT-5", sources, lite=True):
+    print(partial["step"], "...")
 ```
 
 ```bash
-# MCP server（15 规范工具：2 研究核心 + 11 异步 + 2 Key 管理）
+# MCP server（19 工具，见下文「MCP 工具清单」）
 python scripts/infoseek_mcp_server.py
 ```
 
 ---
 
-## 🎉 v1.5.0 发布亮点
+## 🎉 2.x 能力概览
 
 | 能力 | 说明 |
 |------|------|
 | 🧭 **搜索引擎全生命周期** | 健康状态机 / 配额追踪 / 认证粘滞 + 新鲜度自愈（配额重置、冷却恢复、API 漂移检测）+ CLI engine-status/reconcile/probe |
-| 🎯 **搜索召回增强** | query 别名扩展 / 跨引擎多样性轮询（防单源垄断）/ 自适应相关性门槛 / 动态层权重 |
+| 🎯 **搜索召回增强** | query 别名扩展 / 跨引擎多样性轮询 / 自适应相关性门槛 / 动态层权重；v1.9.0 起人名 NER 消歧 + 跨语言别名桥接 |
 | 🕸️ **4 级抓取** | L1 静态 → L2 浏览器渲染 → L3 凭证辅助（KeyManager 注入，仅内存）→ L4 多媒体 chunk（whisper 可选降级） |
-| 🔑 **Key 管理** | 归一化 Key 管理（多后端 / 熔断 / 多 key 池 / 配额 / keyring / CLI 16 子命令） |
-| ⚡ **perf 10k 基准** | 10k 源近线性扩展（评分 139s / 冲突 89s / research 97s） |
-| ✅ **回归测试** | **25 套件**全绿 + 质量基线 26/26 all_ok |
+| 💯 **四维锚点评分（唯一口径）** | interaction / topic_match / credibility / llm_readability 四维 base + 信任源/KB 加权；0–1 量纲入口自动归一（P0-OPEN-04），三链路同一聚合真源 |
+| ⚖️ **矛盾检测（键控事实槽）** | GA11 同槽键值冲突 + 否定/反义 + **P0-OPEN-06 时间事实槽**（年月/季度→ISO 区间）；结果区分 冲突 / 无冲突 / 未评估，附覆盖率 |
+| 🗂️ **按域报告模板** | 5 领域 profile + templates.yaml（v3.2.0）：tech 已收窄为通用技术（制造 + AI/软件），高分源（≥70）跨源综合段，核心源为 0 时禁止空骨架 |
+| 🕵️ **OSINT 身份归因** | v2.1.0 双源（sherlock + maigret）真实 CLI 契约 + 双源聚合去重；默认 OFF + consent 授权闸（`infoseek_consent_cli.py`） |
+| 🔗 **QCM 协同** | `qcm_query` 反向调用归零质量管理框架；QVeris 能力路由 + 统一能力注册表 |
+| ✅ **回归测试** | **62 套件**（`tests/run_all.py` 统一入口，绿基线 0 FAIL；可选依赖缺失自动 SKIP，不污染基线） |
 
 ---
 
@@ -49,18 +54,43 @@ pip install -r requirements-extra.txt      # playwright（L2/L3 浏览器抓取�
 # 完整依赖说明见 references/external-deps.md
 ```
 
+> **PYTHONPATH（重要）**：infoseek 的 `scripts/` 与 `core/` 是**脚本风格模块**，
+> 未打包安装到 site-packages。在 skill 根目录之外以脚本/SDK 方式调用时，需让
+> Python 能找到它们，二选一：
+>
+> ```bash
+> # 方式 A：运行前导出（scripts + core 都需要时）
+> export PYTHONPATH="$PWD/scripts:$PWD/core:$PYTHONPATH"
+> python your_script.py
+> ```
+> ```python
+> # 方式 B：代码内注入（推荐写在入口顶部）
+> import sys
+> sys.path.insert(0, "/path/to/infoseek/scripts")
+> sys.path.insert(0, "/path/to/infoseek/core")
+> from infoseek_core_v2 import research
+> ```
+>
+> MCP server 与 `tests/run_all.py` 已内部处理路径，**无需**手动设置 PYTHONPATH。
+> 可选依赖（jieba / pypinyin / jinja2 / playwright 等）缺失时自动降级或 SKIP，不致命。
+
 ### 2. Python SDK
 
 ```python
+import sys; sys.path.insert(0, "scripts")
 from infoseek_core_v2 import (
-    research,           # 同步（兼容入口）
-    async_research,     # 异步（推荐）
-    streaming_research, # 流式（推荐目标）
+    research,            # 同步（兼容入口）
+    async_research,      # 异步（推荐）
+    streaming_research,  # 流式（推荐目标）
 )
+from infoseek_core_v2 import score_source, detect_conflicts
 
-res = research("AI", sources, lite=True)
-async for partial in streaming_research("AI", sources, lite=True):
+res = research("GPT-5", sources, lite=True)
+async for partial in streaming_research("GPT-5", sources, lite=True):
     pass  # partial['step'] ∈ {score_complete, wikidata_complete, ...}
+
+# 评分：入参 score 可为 0–1（自动 ×100 归一）或 0–100；返回含 classification / base_origin
+r = score_source({"url": "...", "title": "...", "snippet": "..."}, "GPT-5")
 ```
 
 ### 3. MCP 集成
@@ -85,11 +115,32 @@ async for partial in streaming_research("AI", sources, lite=True):
 
 > 💡 Windows 环境请将 `command` 改为 `python3` + `args: ["脚本路径", "--transport", "stdio"]`。
 
-**工具列表（15 规范 + 12 兼容并存）**：
-- 研究核心 2 个：`research_v3` / `research_stream`
-- 异步工具 11 个：`search_anchors_async` / `fetch_content_async` / `save_archive_async` / `check_dedup_async` / `dedup_stats_async` / `fuse_analysis_async` / `cross_subject_analysis_async` / `summarize_content_async` / `conflict_detection_async` / `score_source_async` / `score_contradiction_async`
-- Key 管理 2 个：`manage_keys`（list/stat/rotate/revoke，脱敏）/ `key_usage`（用量成本报表）
-- 兼容并存期 12 个：11 个同步工具 + `research`（附 `deprecated` 标记）
+**MCP 工具清单（v2.1.0 = 19 个）**：
+
+| # | 工具 | 用途 |
+|---|------|------|
+| 1 | `search_anchors` | 锚点发现（返回候选渠道/锚点框架，非直接搜索） |
+| 2 | `fetch_content` | 4 级降级抓取正文 |
+| 3 | `save_archive` | 调研产物归档 |
+| 4 | `check_dedup` | 去重校验 |
+| 5 | `dedup_stats` | 去重统计 |
+| 6 | `fuse_analysis` | 跨源融合分析 |
+| 7 | `cross_subject_analysis` | 跨主题分析 |
+| 8 | `summarize_content` | 内容摘要 |
+| 9 | `conflict_detection` | 实体感知冲突检测（v3） |
+| 10 | `score_source` | 单源四维评分（唯一聚合口径） |
+| 11 | `score_contradiction` | 声明对矛盾评分（键控槽 + 时间槽 + 否定路） |
+| 12 | `research` | 端到端同步调研（兼容入口） |
+| 13 | `research_v3` | 研究主入口（v3） |
+| 14 | `research_stream` | 流式研究（多步 progress 推送） |
+| 15 | `manage_keys` | Key 管理（list/stat/rotate/revoke，脱敏） |
+| 16 | `key_usage` | Key 用量成本报表 |
+| 17 | `qcm_query` | 反向调用 QCM 归零质量管理框架 |
+| 18 | `identity_attribution` | OSINT 用户名→跨平台身份归因（默认 OFF + consent） |
+| 19 | `account_forensics` | 账号可信度取证（FakeDetect，默认 OFF + consent） |
+
+> 工具定义真源：`scripts/infoseek_mcp_server.py` 的 `TOOLS` 列表。异步包装
+> （`*_async`）在库 API 层提供，MCP 面收敛为上述 19 个；`research` 同步入口保留兼容。
 
 ---
 
@@ -181,7 +232,7 @@ async for partial in streaming_research("AI", sources, lite=True):
 | [references/api-keys.md](references/api-keys.md) | 外部 API Key 清单 + 效益 + 获取 |
 | [references/ROADMAP.md](references/ROADMAP.md) | 当前基线 · 待办 · 前景方向（纯净版） |
 | references/ROADMAP_archive_20260917.md | v1.0.0→v2.0.0 历史实施记录归档 |
-| [tests/](tests/) | 测试套件（25 标准 + deep，run_tests.py 聚合） |
+| [tests/](tests/) | 测试套件（62 个 `test_*.py`，统一入口 `run_all.py`；`run_tests.py` 为旧聚合器） |
 
 > ℹ️ **冷启动说明**：运行时状态（`claims.json`、`entity_aliases.json`、`pending_entities.json`、`anchor_db.json`、`engine_state.json` 等）首跑为空占位，运行后随调研逐步积累。这些文件**不写入技能源码目录**，落在运行时数据目录（默认 `~/.infoseek/`，可用 `INFOSEEK_DATA_DIR` 覆盖），技能更新不丢数据。详见 `core/state_dir.py`。
 
@@ -191,42 +242,35 @@ async for partial in streaming_research("AI", sources, lite=True):
 
 | 版本 | 状态 | 备注 |
 |------|------|------|
-| v1.5.0 | 🟢 **当前发布版** | 身份归因能力链 P0：发现→验证闭环 + MCP 工具 + 主链集成（合规双闸） |
-| v1.4.1 | ✅ 历史 | 能力里程碑：引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
-| v1.0.1 | ✅ 历史 | 审计 G1–G13 + ABC 能力增强 + 引擎生命周期 P0–P3 |
-| v1.0.0 | ✅ 历史 | 工具面收敛 + 搜索引擎降级链重写 |
+| v2.1.0 | 🟢 **当前发布版** | OSINT 双客户端真实 CLI 契约修复 + 双源聚合 + consent 授权 CLI |
+| v2.0.0 | ✅ 历史 | GA11 键控事实槽矛盾检测 + GA12 网络边界门控；DSH 插件 manifest |
+| v1.9.0 | ✅ 历史 | GA9 人名消歧五步 + GA10 跨语言别名桥接 |
+| v1.8.x | ✅ 历史 | 版本单源化 / 回归 runner / 评分三链路口径统一 / 分词单源化 |
+| v1.5.0 | ✅ 历史 | 身份归因能力链 P0：发现→验证闭环（v2.1.0 已重写其 CLI 契约） |
+| v1.4.1 | ✅ 历史 | 引擎生命周期 / 召回增强 / 4 级抓取 / Key 管理 / perf 10k |
 | 后续 | 🟡 待办 | 见 `references/ROADMAP.md` |
 
 ---
 
-## 测试矩阵
+## 测试
 
-> ⚠️ 用例数为各套件自报（PASS 计数）。运行入口：`python tests/run_tests.py`（脚本风格，勿用 pytest）。
+> 测试为「脚本风格」（顶层直接执行），**不要用 pytest 直接收集**（会因 SystemExit 崩溃）。
+> 统一入口：**`python tests/run_all.py`**。当前 **62 个 `test_*.py` 套件**，绿基线判据
+> = 0 FAIL + 0 TIMEOUT；SKIP 单列（可选依赖缺失，不污染基线）。
 
-| 套件 | 用例 | 类别 |
-|------|------|------|
-| test_infoseek_v231.py | 10 | 回归 |
-| test_infoseek_v240.py | 15 | 回归 |
-| test_boundary_v240.py | 12 | 能力边界 |
-| test_compat_v240.py | 5 | 兼容性 |
-| test_correctness_v240.py | 18 | 正确性 |
-| test_reliability_v240.py | 11 | 可靠性 |
-| test_security_v240.py | 5 | 安全 |
-| test_stability_v240.py | 9 | 稳定性 |
-| test_e2e_scenarios_v240.py | 12 | E2E 实战 |
-| test_streaming_v300.py | 6 | 流式 |
-| test_search_engines.py | 16 | 搜索链 |
-| test_tools_surface.py | 11 | 工具面 |
-| test_async_tools.py | 11 | async 包装 |
-| test_domain_orchestrator_v200.py | 13 | 领域编排 |
-| test_v174_jaccard.py | 3 | Jaccard 兼容 |
-| test_qcm_bridge_v101.py | 10 | QCM 协同 |
-| test_key_manager_v101.py | 29 | Key 管理 |
-| test_engine_lifecycle_v101.py | 40 | 引擎生命周期 |
-| test_freshness_cron_v101.py | 23 | 新鲜度 cron |
-| test_recall_enhance_v101.py | 16 | 召回增强 |
-| test_fetch_levels_v101.py | 26 | 4 级抓取 |
-| test_deep_v101.py | 22 | 深度（单独运行） |
+```bash
+python tests/run_all.py                 # 全量回归（统一超时/隔离 env/JSON 落盘）
+python tests/run_all.py --timeout 300   # 放宽每套件超时
+python tests/test_three_chain_v183.py   # 单套件直跑
+```
+
+- **run_all.py（推荐）**：统一发现、隔离搜索 env（`INFOSEEK_PLATFORM_WEBSEARCH=off`）、
+  per-suite 超时、PASS/FAIL/SKIP 三态严格归类、结果 JSON 落盘。
+- **run_tests.py（旧聚合器，保留）**：逐子进程直跑的轻量入口；v2.1.0 已修正其
+  SKIP 判定（旧逻辑 returncode==0 先短路吞掉自报 SKIP、且只看 stdout）。
+- **SKIP / 可选依赖**：jieba / pypinyin 等可选依赖缺失时，相关套件自报
+  `0 PASS / N SKIP` 并 `exit 0`，run_all 归类 SKIP；装齐依赖后自动恢复为全断言运行。
+- **性能套件**：`test_perf_v101.py` 为独立观测（LRU 缓存基线），在 SLOW_SUITES 中给独立超时。
 
 > 环境差异说明：`test_stability_v240.py` 在 POSIX 环境含内存维度（ru_maxrss）；Windows 下自动跳过内存判定，不误报 FAIL。
 
@@ -240,25 +284,29 @@ infoseek/
 ├── manifest.yaml       # 平台 manifest
 ├── RELEASE_NOTES.md   # 版本发布说明
 ├── README.md           # 本文件
-├── core/               # 核心库（22 功能模块；运行时状态经 state_dir 落 ~/.infoseek）
-│   ├── conflict_v3.py / contradiction_scorer.py
+├── core/               # 核心库（矛盾评分/实体图谱/身份归因/状态管理）
+│   ├── conflict_v3.py / contradiction_scorer.py  # 冲突 v3 + 键控/时间事实槽
+│   ├── person_ner.py / xling_bridge.py           # v1.9.0 人名消歧 + 跨语言别名
+│   ├── identity_aggregator.py / maigret_client.py / sherlock_client.py  # v2.1.0 OSINT
 │   ├── entity_*.py     # graph/heat/profile/trajectory/tracker/aliases
 │   ├── wikidata_sync.py / freshness_cron.py / claim_store.py
 │   ├── key_manager.py / llm_router.py / ner.py / trust_sources.py
 │   └── state_dir.py
 ├── scripts/            # 适配层 + MCP server
-│   ├── infoseek_core_v2.py       # 核心 API（research/async/streaming）
-│   ├── infoseek_mcp_server.py    # MCP server 门面（15 规范工具）
+│   ├── infoseek_core_v2.py       # 核心 API（research/async/streaming/score/conflict）
+│   ├── infoseek_mcp_server.py    # MCP server 门面（19 工具）
 │   ├── mcp_tools_*.py            # 工具模块（search/archive/analysis/keys/async/common/qcm）
+│   ├── domain_router.py          # 5 领域路由（词边界匹配 + 多域交集）
+│   ├── domain_orchestrator.py    # 领域调度 + 按域模板渲染 + 过滤清单
 │   ├── infoseek_pipeline.py      # 搜索降级链 + 召回增强
 │   ├── engine_lifecycle.py       # 搜索引擎全生命周期
-│   ├── infoseek_keys_cli.py      # keys CLI（16 子命令）
+│   ├── infoseek_consent_cli.py   # v2.1.0 能力授权 CLI（list/grant/revoke/doctor）
 │   └── ...
-├── references/         # 契约 + 配置 + 依赖/Key/路线图
+├── references/         # 契约 + 配置（keyword.yaml / contradiction-synonyms.json）+ 依赖/Key/路线图
 ├── domains/            # 领域配置（tech/market/finance/policy/competitor）
-│   ├── *.yaml          # 领域 profile
-│   └── templates.yaml  # 报告模板（块标量合并）
-├── tests/              # 测试套件（25 标准 + deep）
+│   ├── *.yaml          # 领域 profile（Markdown 文本，raw 读取）
+│   └── templates.yaml  # 报告模板（v3.2.0，含跨源综合段 + 空源守卫）
+├── tests/              # 62 个测试套件（run_all.py 统一入口）
 └── dist/               # 质量基线 + perf 基准 + 生态构建产物
 ```
 
@@ -273,4 +321,4 @@ infoseek/
 
 ---
 
-> v1.5.0 | 身份归因能力链 P0（发现→验证→MCP→主链）| 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
+> v2.1.0 | OSINT 双源聚合 + 键控/时间事实槽矛盾检测 + 四维锚点评分 + 按域报告 | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License

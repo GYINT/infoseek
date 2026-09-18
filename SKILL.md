@@ -1,6 +1,6 @@
 ---
 name: infoseek
-version: 2.0.0
+version: 2.1.0
 description: 端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级：静态/渲染/凭证/多媒体）、搜索引擎全生命周期管理（健康/配额/新鲜度自愈）、QVeris 能力路由、统一能力注册表（consent 闸控）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并+人名消歧动态注册）、召回增强（别名扩展/多样性合并/自适应门槛/跨语言别名桥接）、跨源融合分析，最终输出结构化 Markdown 报告，可选自动归档。适用：行业调研、趋势分析、竞品分析、市场研究、技术研究、内容采集、报告生成、长期知识库建设。不适用：实时新闻监控、学术文献综述、浏览器自动化爬取、即时聊天对话
 license: MIT
 ---
@@ -147,7 +147,7 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 |-----------|------|------|
 | `detect_conflicts_v3` / `detect_conflicts_v3_async` | `core/conflict_v3.py` | 跨源矛盾检测（别名归并 + 严重度评级） |
 | `ConflictMonitor.ingest_*_async` | `core/conflict_v3.py` | 实时冲突管道（async 接口） |
-| `score_contradiction` / `score_contradiction_async` | `core/contradiction_scorer.py` | 两句话矛盾评分（severity 四档） |
+| `score_contradiction` / `score_contradiction_async` | `core/contradiction_scorer.py` | 两句话矛盾评分（severity 四档）：键控事实槽 + 否定/反义 + **时间事实槽**（年月/季度→ISO 区间）三路 max 融合，verdict 三态（conflict/no_conflict/not_assessable）+ 覆盖率 |
 | `EntityGraph` | `core/entity_graph.py` | 实体图谱（加权边 + Graphviz 导出） |
 | `extract_entities` | `core/ner.py` | 命名实体识别（95+ 实体词典） |
 | `predict_heat` | `core/entity_heat.py` | 实体热度预测（衰减外推） |
@@ -186,6 +186,9 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 | public-apis 免费目录 | `scripts/public_apis_catalog.py` | L0 免费优先层：README→本地 JSON 索引（1712 条/51 分类/799 无 key），关键词/分类/认证检索，离线内嵌集兜底 |
 | 三级路由 | `scripts/tiered_router.py` | 意图识别→L0 免费→L1 网关→L2 专用→人工核实；免费优先、credits 预算保护 |
 | 账号人因验证 | `scripts/account_trust_scorer.py` | L2 真人验证：成熟度/粉丝/行为/内容四维评分→real/bot/suspicious/unknown，纯规则零依赖（consent 闸控） |
+| OSINT 双客户端 | `scripts/maigret_client.py` · `scripts/sherlock_client.py` | 用户名→跨平台存在性（v2.1.0 对齐实测 CLI：maigret `-J simple` 报告文件 / sherlock `--csv`），默认 OFF + consent 闸 |
+| 双源聚合去重 | `core/identity_aggregator.py` | Maigret×Sherlock 平台/URL 归一去重、交叉确认置信增强、高误报平台抑制、单源降档、CN/IN/global 分区（纯标准库） |
+| 能力授权 CLI | `scripts/infoseek_consent_cli.py` | list/grant/revoke/shell-init/doctor；grant/revoke 写 consent.log 审计 + export 引导（v2.1.0） |
 | AgentKey 网关适配 | `ecosystem/adapters/agentkey.py` | L1 网关付费层：MCP find_tools→describe_tool→execute_tool 骨架（金融子集优先，社交默认 OFF），mcp 缺失优雅降级 |
 | L2 多引擎渲染 | `scripts/l2_renderer.py` | browser_engine 能力族：Camoufox 主(反指纹) + Obscura 批(30MB轻量) + Patchright 备 + Chromium 兜底；场景路由 + 健康状态机 + 故障 cross-over；引擎缺失自动跳过降级 L1 |
 
@@ -227,6 +230,14 @@ res = research("AI Agent 行业 2026 Q1 [归档]", lite=True)
 > `tier` 单源委托 `trust_sources.get_tier_level`（恒 1-4）；分类阈值 / 复活门禁用常量单源。
 > 口径事实：简化复活 `base≥90 → 保底 70` 经实测**恒为数值 no-op**（仅 `whitelist_triggered`
 > 标志位有效）。守护见 `tests/test_three_chain_v183.py`（63 check）。
+>
+> **量纲归一（P0-OPEN-04）**：`score_source` 入口检测入参 `score`，`0 < score <= 1`
+> 自动 ×100（精确 0 仍为 empty），由 `scale_normalized` 标志可观测，避免 0–1 归一化分
+> 被当 <40 噪声静默丢弃。
+>
+> **空骨架防护（P0-OPEN-04）**：`render_report` 过滤低分源时输出 `filtered_out`
+> 清单（来源 + 分数 + 原因）；核心源全为 0 时报告**前置**「无可用核心来源（评分链异常）」，
+> 明确区分"评分链断裂"与"主题无资料"，禁止假装成功的空骨架。
 
 ```
 Anchor_Score = 互动深度(interaction)×20% + 主题一致性(topic_match)×30% + 来源可信度(credibility)×40% + LLM 上下文可读性(llm_readability)×10%
@@ -237,9 +248,13 @@ Anchor_Score = 互动深度(interaction)×20% + 主题一致性(topic_match)×30
 
 ### 5.2 矛盾检测语义
 
-- **事实槽提取** → 共享槽对比
+- **键控事实槽（GA11）** → 同槽键值冲突（数值/枚举/极性）
+- **时间事实槽（P0-OPEN-06）** → 年月/季度解析为 ISO `[start,end)` 区间，不相交即时间冲突
+  （季/月 60 分、年仅 35 分）；季度序号与金额不误抽
 - **否定/反义词典** → 极性反转
-- **极性放大** → severity 四档（high / medium / low / none）
+- **三路 max 融合** → severity 四档（high / medium / low / none）
+- **判定三态** → `verdict`：conflict（有冲突）/ no_conflict（双侧可对拍且无冲突）/
+  not_assessable（双侧缺可对拍槽，未评估 ≠ 无冲突）；附 `time_coverage` 与聚合层覆盖率
 
 详见 `core/contradiction_scorer.py`
 

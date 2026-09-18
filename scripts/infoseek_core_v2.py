@@ -165,6 +165,17 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
     """
     # 0) base 三态入口（base_origin 可观测）
     base_score = source.get('score', 0)
+    # P0-OPEN-04：量纲归一化。外部源/调用方可能传入 0-1 归一化分（如 0.72），
+    # 旧逻辑直接采用 → 0.72 被当 <40 噪声，且 ≤0 语义兜底条件也不触发（>0 假阳性），
+    # 致高分源被静默滤除。规则：0 < score <= 1 → 视作比例分 ×100；
+    # 精确 0 仍为 empty（真实无分），1 归一为 100（边界含入，避免满分源被丢弃）。
+    scale_normalized = False
+    try:
+        if isinstance(base_score, (int, float)) and 0 < float(base_score) <= 1:
+            base_score = round(float(base_score) * 100, 2)
+            scale_normalized = True
+    except (TypeError, ValueError):
+        pass
     base_origin = 'v1_score' if base_score else 'empty'
     xling_bridge_score = 0  # v1.9.0 GA10：跨语言桥接分（仅 semantic_fallback 路径产生）
 
@@ -285,6 +296,7 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
         'final_score': final,
         'base_score': base_score,
         'base_origin': base_origin,
+        'scale_normalized': scale_normalized,  # P0-OPEN-04：入参 0-1 量纲已 ×100
         'tier': tier,
         'trust_bonus': trust_bonus,
         'trust_bonus_base': trust_bonus_base,
@@ -657,18 +669,35 @@ def research(subject: str,
         try:
             from contradiction_scorer import score_contradiction
             enriched = []
+            verdict_counts = {'conflict': 0, 'no_conflict': 0,
+                              'not_assessable': 0}
+            time_cov_counts = {'both_timed': 0, 'partial': 0, 'neither': 0}
             for c in result['conflicts']:
                 sc = score_contradiction(c['claim_a'], c['claim_b'])
                 c2 = dict(c)
                 c2['semantic_score'] = sc['score']
                 c2['severity'] = sc['severity']  # 用语义评覆盖中等/高严重度
+                c2['verdict'] = sc.get('verdict')       # P0-OPEN-06
+                c2['time_coverage'] = sc.get('time_coverage')
+                verdict_counts[sc.get('verdict', 'not_assessable')] = \
+                    verdict_counts.get(sc.get('verdict', 'not_assessable'), 0) + 1
+                time_cov_counts[sc.get('time_coverage', 'neither')] = \
+                    time_cov_counts.get(sc.get('time_coverage', 'neither'), 0) + 1
                 enriched.append(c2)
             result['conflicts'] = enriched
+            _scored = len(enriched)
+            # P0-OPEN-06：区分"真冲突 / 无冲突 / 未评估"，并给时间槽覆盖率。
+            # assessed = conflict + no_conflict（有可对拍事实槽）；not_assessable 为未评估。
+            _assessed = verdict_counts['conflict'] + verdict_counts['no_conflict']
             result['contradiction_scoring'] = {
                 'enabled': True,
-                'version': '1.2.0',
-                'scored': len(enriched),
+                'version': '1.3.0',
+                'scored': _scored,
                 'method': 'local',   # 默认本地分（LLM 增强待后续接入）
+                'verdict_counts': verdict_counts,
+                'time_coverage_counts': time_cov_counts,
+                # 可评估率：有可对拍事实槽的对比对占比（其余为未评估，非"无冲突"）
+                'assessment_coverage': round(_assessed / _scored, 3) if _scored else 0.0,
             }
         except Exception as e:
             result['contradiction_scoring'] = {'enabled': False, 'error': str(e)}

@@ -2199,6 +2199,15 @@ def _build_identity_anchors(accounts: list, username: str, max_results: int) -> 
             "trust_score": acc.get("trust_score"),
             "trust_confidence": acc.get("trust_confidence"),
         }
+        # v2.1.0 双源聚合元信息（存在则透传，便于审计/呈现）
+        if acc.get("sources"):
+            anchor["attribution_sources"] = list(acc["sources"])
+        if acc.get("cross_source_confirmed"):
+            anchor["cross_source_confirmed"] = True
+        if acc.get("weak_single_source"):
+            anchor["weak_single_source"] = True
+        if acc.get("region"):
+            anchor["region"] = acc["region"]
         try:
             from identity_confidence_fusion import fuse_anchor
             fused = fuse_anchor(acc)
@@ -2367,6 +2376,67 @@ def _e_verdicts(verdicts: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in c.items() if v)
 
 
+def _collect_identity_multisource(username: str, consent: bool, max_results: int):
+    """v2.1.0 双源聚合采集：Maigret 与 Sherlock 都有效时分别执行，经
+    identity_aggregator 去重/交叉确认/误报抑制；任一源失败不影响另一源。
+
+    返回 (accounts, used_sources:list, trail:list[(src,status)])。
+    - 两源均不可用/全失败 → (None, [], trail)，调用方回退单源代偿链。
+    - 仅一源成功 → 用该源结果（aggregator 亦兼容单源）。
+    """
+    try:
+        from core.capability_registry import is_effective_enabled
+        from core.identity_aggregator import aggregate
+    except Exception:
+        return None, [], []
+
+    sources = []
+    if is_effective_enabled("Maigret"):
+        sources.append("Maigret")
+    if is_effective_enabled("Sherlock"):
+        sources.append("Sherlock")
+    if not sources:
+        return None, [], []
+
+    def _run(src):
+        if src == "Maigret":
+            from maigret_client import search as m_search
+            return m_search(username, consent=consent, max_sites=100, timeout=180)
+        from sherlock_client import search as s_search
+        return s_search(username, consent=consent, timeout=120)
+
+    results_by_source = {}
+    trail = []
+    for src in sources:
+        try:
+            res = _run(src)
+            if res:
+                results_by_source[src] = res
+                trail.append((src, f"ok:{len(res)}"))
+            else:
+                trail.append((src, "empty"))
+        except Exception as e:  # 单源失败不拖垮另一源
+            trail.append((src, f"fail:{type(e).__name__}"))
+
+    if not results_by_source:
+        return None, [], trail
+
+    try:
+        agg = aggregate(results_by_source)
+        accounts = agg.get("accounts", [])
+        log.info(f"[身份归因] 双源聚合 raw={agg['stats']['raw_total']} "
+                 f"deduped={agg['stats']['deduped_total']} "
+                 f"cross={agg['stats']['cross_confirmed']} "
+                 f"weak={agg['stats']['weak_single']} "
+                 f"dropped_fp={agg['stats']['dropped_fp']} "
+                 f"region={agg['stats']['by_region']}")
+        return accounts, list(results_by_source.keys()), trail
+    except Exception as e:
+        log.warning(f"[身份归因] 聚合失败，回退拼接单源结果: {e}")
+        flat = [a for lst in results_by_source.values() for a in lst]
+        return flat, list(results_by_source.keys()), trail
+
+
 def search_identity_attribution(username: str, consent: bool = False,
                                  max_results: int = 10) -> list:
     """身份归因阶段（锚点矩阵平面 B）：已知用户名 → 平台账号锚点。
@@ -2389,17 +2459,26 @@ def search_identity_attribution(username: str, consent: bool = False,
         return []
 
     handlers = _identity_handlers(consent, max_results)
-    from capability_compensator import compensate, audit_trail
-    res = compensate("Maigret", handlers, username, max_results=max_results)
-    _audit_identity(audit_trail(res))
 
-    if res.result is None:
-        return []
-    accounts = res.result if isinstance(res.result, list) else []
-    if res.gap_flag:
-        # 仅缺口标记，不包装为锚点（避免误导）
-        log.warning(f"[身份归因] 能力链耗尽，标记需人工核实: {username}")
-        return []
+    # v2.1.0：优先双源聚合（Maigret+Sherlock 交叉确认/去重/误报抑制）；
+    # 两源均无有效结果时，回退原 compensate 单源代偿链（含 manual_review 缺口标记）。
+    accounts, used_sources, multi_trail = _collect_identity_multisource(
+        username, consent, max_results)
+    if accounts:
+        _audit_identity(
+            f"identity_multisource user={username} used={used_sources} trail={multi_trail}")
+    else:
+        from capability_compensator import compensate, audit_trail
+        res = compensate("Maigret", handlers, username, max_results=max_results)
+        _audit_identity(audit_trail(res))
+        if res.result is None:
+            return []
+        accounts = res.result if isinstance(res.result, list) else []
+        used_sources = [res.used] if res.used else []
+        if res.gap_flag:
+            # 仅缺口标记，不包装为锚点（避免误导）
+            log.warning(f"[身份归因] 能力链耗尽，标记需人工核实: {username}")
+            return []
 
     # T1/G3：发现→验证闭环（AccountTrustScorer 批量人因评分，验证为增强不阻断）
     accounts = _verify_accounts(accounts)
@@ -2412,5 +2491,6 @@ def search_identity_attribution(username: str, consent: bool = False,
 
     # T4：三因子置信度融合锚点构建（新增字段，不覆盖原字段；异常降级原输出）
     anchors = _build_identity_anchors(accounts, username, max_results)
-    log.info(f"[身份归因] '{username}' → {len(anchors)} 个账号锚点（via {res.used}）")
+    via = "+".join(used_sources) if used_sources else "capability-chain"
+    log.info(f"[身份归因] '{username}' → {len(anchors)} 个账号锚点（via {via}）")
     return anchors

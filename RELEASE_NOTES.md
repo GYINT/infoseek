@@ -1,3 +1,37 @@
+# Infoseek v2.1.0 发布说明
+
+> 发布日期：2026-09-18 ｜ 版本：**2.1.0**（OSINT 身份归因 P0 契约修复 + 双源聚合 + 授权 UX）｜ 许可证：MIT
+> 前置：v2.0.0（GA11 键控事实槽 + GA12 网络边界门控）。MINOR 定级：修复 Maigret/Sherlock 客户端真实 CLI 契约（功能性），新增双源聚合引擎与授权 CLI，向后兼容。
+
+## 一句话总结
+
+**让身份归因从"测试通过但真实环境跑不通"变为"契约对齐真实 CLI + 双源交叉验证"**：
+沙箱装包实测发现 sherlock 0.16.2 / maigret 0.6.5 的调用参数与输出解析与代码完全不符
+（sherlock `--json` 是数据输入、无 JSON 结果；maigret `-J simple` 写报告文件、状态嵌套 dict），
+重写两客户端后新增 **Maigret×Sherlock 双源聚合去重引擎**（平台/URL 归一去重、交叉确认置信增强、
+高误报平台抑制、CN/IN/全局分区）与**能力授权 consent CLI**。全量回归
+**62 PASS / 0 SKIP / 0 FAIL（91.4s）**，默认 OFF / 降级链 / 老契约不变。
+
+## v2.1.0 核心改动
+
+1. **P0 契约修复**：`sherlock_client` 改 `--csv --print-found` 读 CSV（回填 username）；
+   `maigret_client` 改 `--top-sites N --no-recursion -J simple` 读报告文件 + 嵌套 status 解析。
+2. **双源聚合**（新增 `core/identity_aggregator.py`）：去重 / 双源交叉 +0.10（封顶 0.99）/
+   单源高误报平台丢弃、跨源复活 / 单源长尾降档 / CN/IN/global 分区。
+3. **pipeline 接线**：`search_identity_attribution` 双源聚合优先，全空回退单源代偿链；
+   锚点新增 attribution_sources / cross_source_confirmed / weak_single_source / region。
+4. **授权 UX**（新增 `scripts/infoseek_consent_cli.py`）：list / grant / revoke / shell-init / doctor，
+   grant/revoke 写 consent.log 审计并输出 export 引导（registry.yaml 保持只读）。
+5. **测试加固**：消除三处"依赖本机未装 CLI"的环境脆弱性（注入式 mock，零网络）；
+   新增 2 套件（聚合 24 断言、CLI 16 断言），客户端契约守护扩至 20 断言。
+
+## 真实环境待办（本版不闭环）
+
+真实登录源凭证冒烟、真实 OSINT 样本误报阈值校准（误报表为规则框架，Droners 等实测平台先行入表）、
+Linux/macOS 安装实证。见 `references/ROADMAP.md` P1。
+
+---
+
 # Infoseek v2.0.0 发布说明
 
 > 发布日期：2026-09-16 ｜ 版本：**2.0.0**（GA11 键控事实槽 C 混合分层 + GA12 网络边界门控）｜ 许可证：MIT

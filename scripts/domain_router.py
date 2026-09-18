@@ -44,6 +44,9 @@ _BUILTIN_TRIGGERS = {
             'framework', 'open source', 'software', 'algorithm', 'chip',
             'architecture', 'deep learning', 'machine learning', 'llm',
             'training', 'inference', 'api', '模型', '微调', '部署',
+            # P0-OPEN-05：AI 产品/实体词（与 keyword.yaml 唯一真源保持一致）
+            'gpt', 'gpt5', 'gpt-5', 'chatgpt', 'openai', 'claude', 'gemini',
+            'agent', '智能体', 'aigc', '生成式',
         ],
     },
     'market-research': {
@@ -117,6 +120,26 @@ def _load_domain_triggers() -> dict:
 DOMAIN_TRIGGERS = _load_domain_triggers()
 
 
+# P0-OPEN-05：纯字母/数字的短缩写（≤4 字符，如 PE/PB/RSI/KDJ/GB）若用裸子串
+# 匹配会误命中普通英文单词（实测 'PE' in 'openai' → 把「OpenAI Agent」误判金融）。
+# 这类 token 必须走正则词边界；中文词与含空格/长英文短语保留子串匹配。
+_ASCII_WORD_RE = re.compile(r'^[a-z0-9]{1,4}$')
+# 产品前缀（纯字母、以字母结尾）：允许后接版本数字（GPT4/GPT-5），故后向只排除字母。
+_PREFIX_WORDS = {'gpt'}
+
+
+def _keyword_hit(kw_lower: str, subject_lower: str) -> bool:
+    """关键词是否命中文本。短 ASCII token 用词边界，其余用子串。"""
+    if _ASCII_WORD_RE.match(kw_lower):
+        if kw_lower in _PREFIX_WORDS:
+            tail = r'(?![a-z])'      # 后可接数字/连字符（版本号），不可接字母（防 openai 类）
+        else:
+            tail = r'(?![a-z0-9])'
+        return re.search(r'(?<![a-z0-9])' + re.escape(kw_lower) + tail,
+                         subject_lower) is not None
+    return kw_lower in subject_lower
+
+
 def detect_domain(subject: str) -> dict:
     """根据主题文本自动选择最匹配的领域 profile。
 
@@ -137,7 +160,7 @@ def detect_domain(subject: str) -> dict:
     for domain, cfg in DOMAIN_TRIGGERS.items():
         hit_count = 0
         for kw in cfg['keywords']:
-            if kw.lower() in subject_lower:
+            if _keyword_hit(kw.lower(), subject_lower):
                 hit_count += 1
         score = hit_count * cfg['weight']
         candidates.append({

@@ -178,8 +178,36 @@ class DomainOrchestrator:
             domain = detect_result.get('domain')
             is_default = detect_result.get('is_default', True)
 
-        # 2. 过滤低分源
-        qualified = [s for s in sources if s.get('score', 0) >= min_score]
+        # 2. 过滤低分源（P0-OPEN-04：同时收集被过滤清单 + 原因，核心源为 0 时禁止空骨架）
+        def _num_score(x):
+            try:
+                return float(x) if x is not None else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        all_zero = bool(sources) and all(
+            _num_score(x.get('score', 0)) <= 0 for x in sources)
+        qualified = []
+        filtered_out = []
+        for idx, s in enumerate(sources):
+            sc = _num_score(s.get('score', 0))
+            if sc >= min_score:
+                qualified.append(s)
+            else:
+                if all_zero:
+                    reason = '核心源评分为 0（评分缺失/未评分，疑似评分链断裂）'
+                elif sc <= 0:
+                    reason = '评分为 0/缺失（未通过评分或无文本可评分）'
+                else:
+                    reason = f'低于入围阈值（{sc:.0f} < {min_score}）'
+                filtered_out.append({
+                    'index': idx + 1,
+                    'title': s.get('title') or s.get('url') or 'Untitled',
+                    'url': s.get('url', ''),
+                    'platform': s.get('platform', ''),
+                    'score': sc,
+                    'reason': reason,
+                })
 
         # 3. 应用领域打分（可选）
         scored = []
@@ -203,6 +231,9 @@ class DomainOrchestrator:
             rs['text_excerpt'] = _excerpt(rs.get('text'))
             rendered_sources.append(rs)
 
+        # P0-OPEN-04：被过滤清单的 Markdown 块（核心源为 0 时前置告警，禁止空骨架）
+        filter_block = self._render_filtered_block(filtered_out, all_zero, min_score)
+
         # 6. 渲染模板
         if template_info:
             markdown = self._render_jinja2(template_info['raw'], {
@@ -211,9 +242,21 @@ class DomainOrchestrator:
                 'sources': rendered_sources,
                 'sources_count': len(rendered_sources),
                 'is_default_template': is_default_template,
+                'filtered_count': len(filtered_out),
+                'filtered_out': filtered_out,
+                'all_core_zero': all_zero,
+                'filter_block': filter_block,
             })
         else:
             markdown = self._render_fallback(subject, domain, rendered_sources)
+
+        # P0-OPEN-04：无核心源时禁止空骨架——把过滤清单与原因前置到报告顶部；
+        # 有核心源但存在被滤源时，把清单附到报告末尾（可追溯，不干扰正文）。
+        if filtered_out:
+            if all_zero or not rendered_sources:
+                markdown = filter_block + "\n---\n\n" + markdown
+            else:
+                markdown = markdown.rstrip() + "\n\n" + filter_block + "\n"
 
         return {
             'subject': subject,
@@ -222,8 +265,48 @@ class DomainOrchestrator:
             'markdown': markdown,
             'qualified_count': len(qualified),
             'total_count': len(sources),
+            'filtered_count': len(filtered_out),       # P0-OPEN-04
+            'filtered_out': filtered_out,             # P0-OPEN-04：被过滤清单及原因
+            'all_core_zero': all_zero,                # P0-OPEN-04：核心源全为 0
             'is_default_template': is_default_template,
         }
+
+    @staticmethod
+    def _render_filtered_block(filtered_out: list, all_zero: bool,
+                               min_score: int) -> str:
+        """P0-OPEN-04：渲染「被过滤来源清单及原因」Markdown 块。
+
+        核心源全为 0 时输出醒目告警（禁止假装成功的空骨架）；
+        常规低分过滤时输出可追溯清单。
+        """
+        if not filtered_out:
+            return ''
+        lines = []
+        if all_zero:
+            lines.append('## ⚠️ 无可用核心来源（评分链异常）')
+            lines.append('')
+            lines.append('输入的来源评分为 **0**，未产出任何入围核心源。'
+                         '这通常意味着评分链断裂（未评分/抓取正文为空/量纲异常），'
+                         '**而非"主题确实无资料"**。以下来源全部被过滤：')
+        else:
+            lines.append(f'<details><summary>📋 被过滤来源（{len(filtered_out)} 条，'
+                         f'入围阈值 ≥ {min_score} 分）</summary>')
+            lines.append('')
+        lines.append('')
+        lines.append('| # | 来源 | 平台 | 评分 | 过滤原因 |')
+        lines.append('|:--|:-----|:-----|----:|:---------|')
+        for item in filtered_out:
+            title = str(item['title']).replace('|', '\\|')[:60]
+            url = item.get('url') or ''
+            label = f'[{title}]({url})' if url else title
+            platform = str(item.get('platform') or '-').replace('|', '\\|')
+            lines.append(f"| {item['index']} | {label} | {platform} | "
+                         f"{item['score']:.0f} | {item['reason']} |")
+        lines.append('')
+        if not all_zero:
+            lines.append('</details>')
+        lines.append('')
+        return '\n'.join(lines)
 
     def _render_jinja2(self, template_text: str, context: dict) -> str:
         """使用 Jinja2 渲染模板（如未安装则回退到简单替换）"""
