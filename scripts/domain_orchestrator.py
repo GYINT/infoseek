@@ -43,6 +43,62 @@ def _excerpt(text, limit: int = 600) -> str:
     return norm[:limit].rstrip() + '…'
 
 
+# ─── DEF-14（v2.1.1 P2）：报告输出层注入清洗 ─────────────────────────
+# 背景：Jinja2 Template 默认 autoescape=False（见 _render_jinja2），外部可控字段
+#   （subject/title/platform/snippet）原样进 Markdown。已实测无 SSTI（{{7*7}} 不求值，
+#   模板预编译固定），仅存输出层注入面：下游若把报告 Markdown→HTML 渲染且不转义，
+#   <script> 会执行；[x](javascript:...) 在部分渲染器可触发。
+# 处置（报告方案 B：输入清洗，保留正常 Markdown）：移除脚本/事件/危险协议，
+#   不转义有意的 <details>、正常链接与中文，避免伤排版。仅清洗外部输入，
+#   内部自生成的 filter_block（含自有 <details>）不过此函数。
+_DANGEROUS_TAGS_RE = re.compile(
+    r'<\s*/?\s*(script|iframe|object|embed|svg|img|link|meta|style)\b[^>]*>',
+    re.IGNORECASE | re.DOTALL)
+# 标签内事件处理器 on*=（保留标签本身，仅摘掉危险属性；含前导空白防误伤正常词）
+_ON_EVENT_ATTR_RE = re.compile(r'\son\w+\s*=\s*"[^"]*"', re.IGNORECASE)
+_ON_EVENT_ATTR_SQ_RE = re.compile(r"\son\w+\s*=\s*'[^']*'", re.IGNORECASE)
+_ON_EVENT_ATTR_BARE_RE = re.compile(r'\son\w+\s*=\s*[^\s>]+', re.IGNORECASE)
+# Markdown 链接 / 裸 URL 中的危险协议（javascript:/data:/vbscript:）
+_DANGEROUS_PROTO_RE = re.compile(
+    r'(javascript|data|vbscript)\s*:', re.IGNORECASE)
+
+
+def sanitize_markdown_input(value) -> str:
+    """清洗进入报告 Markdown 的外部可控字符串（DEF-14）。
+
+    - 非字符串 → 归一为字符串（None→''）；
+    - 移除可执行/嵌入类危险标签；摘掉标签内 on*= 事件属性；
+    - 中和危险协议（冒号前插入零宽空格阻断，不破坏可读文本）；
+    - 保留正常 Markdown：<details>、[文字](https url)、中文、表格。
+    """
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        value = str(value)
+    text = _DANGEROUS_TAGS_RE.sub('', value)
+    text = _ON_EVENT_ATTR_RE.sub('', text)
+    text = _ON_EVENT_ATTR_SQ_RE.sub('', text)
+    text = _ON_EVENT_ATTR_BARE_RE.sub('', text)
+    text = _DANGEROUS_PROTO_RE.sub(lambda m: m.group(1) + '​:', text)
+    return text
+
+
+def sanitize_csv_cell(value) -> str:
+    """CSV 单元格公式注入防护（DEF-14）：电子表格把 =/+/-/@ 开头单元格当公式执行。
+
+    首字符命中 =、+、-、@、Tab、CR 时前置单引号强制按文本处理（OWASP CSV injection）。
+    数值型（int/float）不处理，避免污染真实分数。
+    """
+    if value is None:
+        return ''
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    if text and text[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + text
+    return text
+
+
 class DomainOrchestrator:
     """领域调度器（v1.9.0 主推①）"""
 
@@ -169,6 +225,15 @@ class DomainOrchestrator:
                 'is_default_template': False,
             }
         """
+        # P1(G-04/G-05)：入参类型守卫。subject 为 None / 非字符串时归一为空串
+        # （旧代码直接透传 detect → subject.lower() 抛 AttributeError 击穿渲染）。
+        if not isinstance(subject, str):
+            subject = '' if subject is None else str(subject)
+        # sources 容错：丢弃非 dict 脏条目（字符串/数字/None 调 .get 会崩）。
+        # total_count 按原始入参计数，仅过滤参与渲染，不静默改写调用方列表长度。
+        total_input = len(sources) if isinstance(sources, (list, tuple)) else 0
+        sources = [s for s in (sources or []) if isinstance(s, dict)]
+
         # 1. 检测 / 覆盖领域
         if domain_override:
             domain = domain_override
@@ -209,11 +274,13 @@ class DomainOrchestrator:
                     'reason': reason,
                 })
 
-        # 3. 应用领域打分（可选）
+        # 3. 应用领域打分（可选；P1 G-05：单条脏源异常不击穿整份渲染）
         scored = []
         for s in qualified:
-            scored_source = self.apply_to_scoring(s, subject)
-            scored.append(scored_source)
+            try:
+                scored.append(self.apply_to_scoring(s, subject))
+            except Exception:
+                scored.append(dict(s))
 
         # 4. 加载模板
         template_name = domain if domain and domain in self.templates else 'default'
@@ -228,16 +295,30 @@ class DomainOrchestrator:
                 rs['score'] = rs['final_score']
             # P2 内容链（2026-09-10）：正文摘要字段——渲染层消费 s.text 的中枢，
             # 模板 / _render_simple / _render_fallback 统一使用（长度归一 + 脏空白清洗）
-            rs['text_excerpt'] = _excerpt(rs.get('text'))
+            # DEF-14：text 先清洗注入载荷再摘要；其余外部可控字段渲染前统一清洗。
+            for _f in ('title', 'url', 'platform', 'snippet'):
+                if _f in rs and isinstance(rs[_f], str):
+                    rs[_f] = sanitize_markdown_input(rs[_f])
+            rs['text_excerpt'] = sanitize_markdown_input(_excerpt(rs.get('text')))
             rendered_sources.append(rs)
 
         # P0-OPEN-04：被过滤清单的 Markdown 块（核心源为 0 时前置告警，禁止空骨架）
+        # DEF-14：filtered_out 的 title/platform 来自外部输入，渲染前清洗；url 仅进
+        # markdown 链接，危险协议在 sanitize_markdown_input 内中和。
+        for _fo in filtered_out:
+            _fo['title'] = sanitize_markdown_input(_fo.get('title'))
+            _fo['platform'] = sanitize_markdown_input(_fo.get('platform'))
+            _fo['url'] = sanitize_markdown_input(_fo.get('url'))
         filter_block = self._render_filtered_block(filtered_out, all_zero, min_score)
+
+        # DEF-14：渲染用 subject 副本做注入清洗（路由 detect / 评分 apply_to_scoring
+        # 仍用原始 subject，保证语义匹配不变）。
+        render_subject = sanitize_markdown_input(subject)
 
         # 6. 渲染模板
         if template_info:
             markdown = self._render_jinja2(template_info['raw'], {
-                'subject': subject,
+                'subject': render_subject,
                 'domain': domain,
                 'sources': rendered_sources,
                 'sources_count': len(rendered_sources),
@@ -248,7 +329,7 @@ class DomainOrchestrator:
                 'filter_block': filter_block,
             })
         else:
-            markdown = self._render_fallback(subject, domain, rendered_sources)
+            markdown = self._render_fallback(render_subject, domain, rendered_sources)
 
         # P0-OPEN-04：无核心源时禁止空骨架——把过滤清单与原因前置到报告顶部；
         # 有核心源但存在被滤源时，把清单附到报告末尾（可追溯，不干扰正文）。
@@ -264,7 +345,8 @@ class DomainOrchestrator:
             'template_used': template_info['path'] if template_info else 'fallback',
             'markdown': markdown,
             'qualified_count': len(qualified),
-            'total_count': len(sources),
+            'total_count': total_input,
+            'dropped_non_dict': total_input - len(sources),  # P1：被跳过的脏条目数
             'filtered_count': len(filtered_out),       # P0-OPEN-04
             'filtered_out': filtered_out,             # P0-OPEN-04：被过滤清单及原因
             'all_core_zero': all_zero,                # P0-OPEN-04：核心源全为 0
@@ -309,13 +391,26 @@ class DomainOrchestrator:
         return '\n'.join(lines)
 
     def _render_jinja2(self, template_text: str, context: dict) -> str:
-        """使用 Jinja2 渲染模板（如未安装则回退到简单替换）"""
+        """使用 Jinja2 渲染模板（P1 G-05：任何渲染异常都降级，禁止击穿 render_report）。
+
+        降级链：Jinja2 → 缺 Jinja2(ImportError) 或模板渲染错(UndefinedError/TypeError
+        等脏上下文) → _render_simple 简单替换 → 再失败 → _render_fallback 兜底列表。
+        """
         try:
             from jinja2 import Template
             tmpl = Template(template_text)
             return tmpl.render(**context)
         except ImportError:
             return self._render_simple(template_text, context)
+        except Exception:
+            # P1(G-05)：模板引用了脏字段 / 上下文类型不符等渲染期错误——
+            # 不应让单条畸形源或模板缺陷击穿整份报告，降级到无模板依赖的渲染。
+            try:
+                return self._render_simple(template_text, context)
+            except Exception:
+                return self._render_fallback(context.get('subject', ''),
+                                             context.get('domain'),
+                                             context.get('sources', []))
 
     def _render_simple(self, template_text: str, context: dict) -> str:
         """无 Jinja2 时的简易渲染（{{ var }} 形式）"""

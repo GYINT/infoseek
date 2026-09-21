@@ -1,9 +1,11 @@
 {
   "_meta": {
-    "version": "1.0.0",
+    "version": "1.1.0",
     "purpose": "GA11 键控事实槽（keyed slots）谓词归一真源：方面簇词表 + 互斥对 + 否定词 + 主体停用词",
     "rule": "同槽键=(主体键, 方面aspect)，值=数值/枚举/极性；同键值冲突才计矛盾，相似度不参与",
-    "created": "2026-09-16"
+    "created": "2026-09-16",
+    "updated": "2026-09-20",
+    "aspects_count": 24
   },
   "aspects": {
     "revenue": {
@@ -95,12 +97,35 @@
       "zh": ["可用", "上线", "开售", "提供", "缺货", "下架", "停售", "不可用"],
       "en": ["available", "in stock", "on sale", "unavailable",
              "out of stock", "discontinued", "offline"]
+    },
+    "analyst_rating": {
+      "zh": ["评级", "机构评级", "投资评级", "目标价", "买入", "卖出", "增持",
+             "减持", "中性", "看多", "看空"],
+      "en": ["rating", "price target", "buy rating", "sell rating", "overweight",
+             "underweight", "neutral", "upgrade", "downgrade"]
+    },
+    "sales_volume": {
+      "zh": ["销量", "销售量", "出货量", "交付量", "订单量"],
+      "en": ["sales volume", "unit sales", "shipments", "deliveries", "order volume"]
+    },
+    "listing_status": {
+      "zh": ["上市", "退市", "招股", "过会", "摘牌", "递交招股书"],
+      "en": ["ipo", "listed", "delisted", "go public", "listing"]
+    },
+    "person_change": {
+      "zh": ["董事长", "创始人", "法定代表人", "总裁", "首席执行官", "高管",
+             "实际控制人"],
+      "en": ["chairman", "founder", "chief executive", "legal representative",
+             "controlling shareholder"]
     }
   },
   "opposites": {
     "open_source": [["开源", "闭源"], ["开源", "专有"],
                     ["open source", "closed source"], ["open source", "proprietary"],
                     ["open-source", "closed-source"]],
+    "analyst_rating": [["买入", "卖出"], ["增持", "减持"], ["看多", "看空"],
+                       ["buy", "sell"], ["overweight", "underweight"],
+                       ["upgrade", "downgrade"]],
     "profit_status": [["盈利", "亏损"], ["profitable", "unprofitable"], ["profit", "loss"]],
     "trend_dir": [["增长", "下滑"], ["增长", "下降"], ["上升", "下降"], ["上涨", "下跌"],
                   ["提升", "降低"], ["增加", "减少"], ["回升", "回落"], ["走强", "走低"],

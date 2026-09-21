@@ -548,8 +548,6 @@ def handle_tools_call(req_id: int, params: Dict) -> Dict:
             result = tool_identity_attribution(args)
         elif tool_name == "account_forensics":
             result = tool_account_forensics(args)
-        elif tool_name == "account_forensics":
-            result = tool_account_forensics(args)
         else:
             return {
                 "jsonrpc": "2.0",

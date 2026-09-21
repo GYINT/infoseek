@@ -67,6 +67,13 @@ _BUILTIN_TRIGGERS = {
             'stock', 'equity', 'bond', 'futures', 'forex', 'technical analysis',
             'valuation', 'backtest', 'portfolio', 'leverage',
         ],
+        # DEF-16（v2.1.1 P2）：中文无空格词边界，2 字短词「回测」裸子串会误嵌进
+        # 常用多字词——铁证「工业来回测试平台」（零金融语义）因「来**回测**试」被判 finance。
+        # strict_keywords 中的 2 字中文词命中时，额外校验每次出现是否都被 false_compounds
+        # （含该词的非金融常用多字词）覆盖；全部被覆盖则不命中，至少一次干净出现才命中。
+        # 仅收录经实证的高置信项，其余 2 字词无实证误例，保留子串匹配（零过杀）。
+        'strict_keywords': ['回测'],
+        'false_compounds': ['来回测试', '回测设备'],
     },
     'policy-research': {
         'weight': 1.0,
@@ -108,12 +115,18 @@ def _load_domain_triggers() -> dict:
                     out[k] = {
                         'weight': v.get('weight', 1.0),
                         'keywords': list(v['keywords']),
+                        # DEF-16：可选歧义短词边界配置（缺失回退内置/空集）
+                        'strict_keywords': list(v.get('strict_keywords', [])),
+                        'false_compounds': list(v.get('false_compounds', [])),
                     }
             if out:
                 return out
     except Exception:
         pass
-    return {k: {'weight': v['weight'], 'keywords': list(v['keywords'])}
+    return {k: {'weight': v['weight'],
+                'keywords': list(v['keywords']),
+                'strict_keywords': list(v.get('strict_keywords', [])),
+                'false_compounds': list(v.get('false_compounds', []))}
             for k, v in _BUILTIN_TRIGGERS.items()}
 
 
@@ -128,8 +141,46 @@ _ASCII_WORD_RE = re.compile(r'^[a-z0-9]{1,4}$')
 _PREFIX_WORDS = {'gpt'}
 
 
-def _keyword_hit(kw_lower: str, subject_lower: str) -> bool:
-    """关键词是否命中文本。短 ASCII token 用词边界，其余用子串。"""
+def _all_occurrences_embedded(kw: str, text: str, false_compounds) -> bool:
+    """DEF-16：判断 kw 在 text 中的每次出现是否都被某个 false_compound（含 kw 的
+    非金融常用多字词）覆盖。
+
+    - 无出现 → False（由调用方先保证 kw in text）；
+    - 任一次出现不落在任何误嵌词区间内 → False（存在干净命中，应真命中）；
+    - 所有出现均被误嵌词区间覆盖 → True（整词只是常用多字词的片段，不命中）。
+    """
+    spans = []
+    for fc in false_compounds:
+        if kw in fc:
+            start = 0
+            while True:
+                idx = text.find(fc, start)
+                if idx < 0:
+                    break
+                spans.append((idx, idx + len(fc)))
+                start = idx + 1
+    if not spans:
+        return False
+    pos = 0
+    while True:
+        idx = text.find(kw, pos)
+        if idx < 0:
+            return True  # 所有出现已遍历完，未发现干净命中
+        end = idx + len(kw)
+        if not any(s <= idx and end <= e for s, e in spans):
+            return False  # 该次出现不在任何误嵌词内 → 干净命中
+        pos = idx + 1
+
+
+def _keyword_hit(kw_lower: str, subject_lower: str,
+                 strict: bool = False, false_compounds=()) -> bool:
+    """关键词是否命中文本。
+
+    - 短 ASCII token（≤4 位字母数字）走正则词边界（防 'PE' in 'openai'）；
+    - DEF-16：strict 的 2 字中文短词，命中后校验是否仅作为 false_compounds 的
+      片段出现（防「回测」误命中「来回测试」）；
+    - 其余（长中文词/英文短语）保留子串匹配。
+    """
     if _ASCII_WORD_RE.match(kw_lower):
         if kw_lower in _PREFIX_WORDS:
             tail = r'(?![a-z])'      # 后可接数字/连字符（版本号），不可接字母（防 openai 类）
@@ -137,7 +188,12 @@ def _keyword_hit(kw_lower: str, subject_lower: str) -> bool:
             tail = r'(?![a-z0-9])'
         return re.search(r'(?<![a-z0-9])' + re.escape(kw_lower) + tail,
                          subject_lower) is not None
-    return kw_lower in subject_lower
+    if kw_lower not in subject_lower:
+        return False
+    if strict and false_compounds and \
+            _all_occurrences_embedded(kw_lower, subject_lower, false_compounds):
+        return False
+    return True
 
 
 def detect_domain(subject: str) -> dict:
@@ -154,13 +210,23 @@ def detect_domain(subject: str) -> dict:
           "profile_path": profile YAML 文件路径，
         }
     """
+    # DEF-13（v2.1.1 P2）：公开函数入口类型守卫。None / 数字 / 其他非字符串
+    # 旧代码直传 .lower() 抛 AttributeError 击穿任何直调方（MCP 工具/新调用点）。
+    # None → ''，其余非字符串 → str()；空输入随后走既有「无触发词→is_default」分支。
+    if not isinstance(subject, str):
+        subject = '' if subject is None else str(subject)
     subject_lower = subject.lower()
 
     candidates = []
     for domain, cfg in DOMAIN_TRIGGERS.items():
         hit_count = 0
+        strict_kw = set(k.lower() for k in cfg.get('strict_keywords', ()))
+        false_compounds = [c.lower() for c in cfg.get('false_compounds', ())]
         for kw in cfg['keywords']:
-            if _keyword_hit(kw.lower(), subject_lower):
+            kwl = kw.lower()
+            if _keyword_hit(kwl, subject_lower,
+                            strict=kwl in strict_kw,
+                            false_compounds=false_compounds):
                 hit_count += 1
         score = hit_count * cfg['weight']
         candidates.append({

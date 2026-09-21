@@ -1,10 +1,10 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v2.1.0 发布版**。
+> 端到端内容智能采集与调研工作流。**v2.2.0 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-2.1.0-blue)](#)
-[![Tests](https://img.shields.io/badge/tests-62%20suites%20green-success)](#)
+[![Version](https://img.shields.io/badge/version-2.2.0-blue)](#)
+[![Tests](https://img.shields.io/badge/tests-67%20suites%20green-success)](#)
 [![MCP](https://img.shields.io/badge/MCP-19%20tools-blueviolet)](#)
 
 ---

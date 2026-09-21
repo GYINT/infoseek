@@ -31,6 +31,9 @@ META_ALIASES = {
     'following':   ['following', 'followees', 'following_count', '关注数', '关注', 'following_cnt'],
     'posts':       ['posts', 'tweets', 'post_count', '发帖数', '帖子数', '动态数', 'statuses_count'],
     'er':          ['er', 'engagement_rate', '互动率', '互动', 'like_rate', 'engagement'],
+    # HF-R1 人因增强字段 (可选; 缺失不报错, 由 L1 侧取中性值)
+    'follower_quality':    ['follower_quality', 'fans_quality', 'fq', '粉丝质量', '粉丝真实性'],
+    'template_similarity': ['template_similarity', 'tpl_sim', '模板相似度', '内容模板化'],
 }
 TS_ALIASES = {
     'likes':  ['likes', 'like_series', '每日点赞', '点赞序列', 'likes_seq', 'likes_ts'],
@@ -73,7 +76,7 @@ class QualityReport:
 class Dataset:
     """标准化数据集: 元表 + 时间序列 + 关系图"""
     def __init__(self, meta_df, likes=None, growth=None, G=None, report=None,
-                 source=None, groups=None):
+                 source=None, groups=None, profile=None, timing=None):
         self.meta_df = meta_df
         self.likes = likes if likes is not None else {}
         self.growth = growth if growth is not None else {}
@@ -81,6 +84,8 @@ class Dataset:
         self.report = report or QualityReport()
         self.source = source
         self.groups = groups      # {集群标识: [成员id]}, 可选真值
+        self.profile = profile    # HF-R1: 账号画像字段 {id:{...}}, 可选（向后兼容默认 None）
+        self.timing = timing      # HF-R1: 活跃时段直方图 {id:[24]}, 可选（向后兼容默认 None）
 
     def describe(self):
         return dict(n=len(self.meta_df), ts_accounts=len(self.likes),
@@ -118,6 +123,15 @@ def _clean_meta(df, report):
         m['er'] = pd.to_numeric(m['er'], errors='coerce').fillna(0.0).clip(0, 1.0)
     else:
         m['er'] = 0.0
+    # HF-R1: 人因增强字段归一化 (可选; 缺失则不新增列, 由 L1 侧取中性值)
+    if 'follower_quality' in m.columns:
+        _fq = pd.to_numeric(m['follower_quality'], errors='coerce').fillna(0.5)
+        if float(np.nanmax(_fq.values)) > 1.0:      # 0-100 分制自动降为 0-1
+            _fq = _fq / 100.0
+        m['follower_quality'] = _fq.clip(0.0, 1.0)
+    if 'template_similarity' in m.columns:
+        m['template_similarity'] = pd.to_numeric(m['template_similarity'], errors='coerce') \
+            .fillna(0.0).clip(0.0, 1.0)
     # id 唯一性
     if m['id'].duplicated().any():
         report.warn(f"id 重复 {int(m['id'].duplicated().sum())} 行, 保留首个")
@@ -329,10 +343,17 @@ def load_dataset(source=None, meta_df=None, ts_path=None, graph_src=None,
     return Dataset(meta, likes, growth, G, report, source=str(source) if source else None)
 
 
-def from_raw(meta_df, likes=None, growth=None, edges=None, groups=None):
+def from_raw(meta_df, likes=None, growth=None, edges=None, groups=None,
+             profile=None, timing=None):
     """内存直连: 已具备标准化对象时直接封装。
     [函数化增强] 与 load_dataset 对齐：likes/growth key 经 id_map 归一化
-    （meta 清洗后 id 变为整数，str key 时序/非数字 id 自动映射）。"""
+    （meta 清洗后 id 变为整数，str key 时序/非数字 id 自动映射）。
+
+    HF-R1（向后兼容）: profile / timing 为可选扩展字段，默认 None 时
+    与旧签名行为完全一致；
+      - profile: {id: {画像字段}}  → Dataset.profile（供后续画像增强）
+      - timing : {id: [24 维活跃直方图]} → Dataset.timing（供 L1 时段熵）
+    """
     report = QualityReport()
     clean = _clean_meta(meta_df, report)
     meta, id_map = clean[0], clean[1] if clean else ({}, {})
@@ -347,7 +368,10 @@ def from_raw(meta_df, likes=None, growth=None, edges=None, groups=None):
 
     likes = remap(likes)
     growth = remap(growth)
-    return Dataset(meta, likes, growth, G, report, source='memory', groups=groups)
+    prof = remap(profile) if isinstance(profile, dict) else profile
+    tim = remap(timing) if isinstance(timing, dict) else timing
+    return Dataset(meta, likes, growth, G, report, source='memory', groups=groups,
+                   profile=prof, timing=tim)
 
 
 # ---------- 演示: 真实业务表脏数据接入 ----------

@@ -35,6 +35,14 @@ domains:
                "市净率", "市盈率", "回测", "策略", "持仓", "杠杆", "做空",
                "stock", "equity", "bond", "futures", "forex", "technical analysis",
                "valuation", "backtest", "portfolio", "leverage"]
+    # DEF-16（v2.1.1 P2）：中文无空格词边界，2 字短词「回测」裸子串会误嵌进常用
+    # 多字词（铁证：「工业来回测试平台」因「来回测」被判 finance-research）。
+    # strict_keywords 中的 2 字中文词命中时，若每次出现都被 false_compounds
+    # （含该词的非金融常用多字词）覆盖则不命中；至少一次干净出现才命中。
+    # 仅收录经实证的高置信项；长词（≥3 字，市盈率/布林带）误嵌概率低保留子串。
+    # 与 scripts/domain_router.py 的 _BUILTIN_TRIGGERS 双源保持一致（本文件缺失时走内置）。
+    strict_keywords: ["回测"]
+    false_compounds: ["来回测试", "回测设备"]
 
   policy-research:
     weight: 1.0

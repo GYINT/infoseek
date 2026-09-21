@@ -67,11 +67,26 @@ def normalize_entity(mention: str, alias_map: Optional[Dict[str, str]] = None) -
     return alias_map.get(key, mention.strip())
 
 
+def _extract_events_for_claim(body: str, subject: str) -> List[Dict]:
+    """v2.1.2（F-06 事件槽批次）：在**原始正文**上抽取结构化事件。
+
+    关键：必须在 text[:500]（claim 正文截断）与 text[:300]（冲突 claim 二级截断）
+    **之前**抽取，此后随 claim 以独立结构化字段传递——否则 scorer 只能从截断文本
+    重抽，事件必然丢失。失败静默降级空列表（不击穿 claim 抽取主链）。
+    """
+    try:
+        from contradiction_scorer import _extract_events
+        return _extract_events(body, subject)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]] = None) -> List[Dict]:
     """从来源提取 (canonical_entity, claim_text) 对
 
     同一来源中同一实体只保留一条（合并段落）
     v2.3.1: 支持传入缓存 alias_map（避免每源重建）
+    v2.1.2: claim 增补 'events'（在原始正文上抽取，跨越 500/300 两级截断）
     """
     if alias_map is None:
         alias_map = _build_alias_map()
@@ -102,6 +117,8 @@ def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]
                 'source': url,
                 'source_title': src.get('title', 'Untitled'),
                 'text': text[:500],
+                # v2.1.2（F-06）：在**完整正文**（未截断）上抽事件，随 claim 传递
+                'events': _extract_events_for_claim(text, canonical),
                 'matched_alias': e.get('matched_alias', ''),
             })
     return claims
@@ -145,8 +162,16 @@ def _group_and_detect(claims: List[Dict], alias_map: Dict[str, str]) -> List[Dic
         conflict = {
             'conflict_id': f'v3_{uuid.uuid4().hex[:8]}',
             'entity_name': entity_name,
-            'claim_a': {'source': a['source'], 'source_title': a['source_title'], 'text': a['text'][:300]},
-            'claim_b': {'source': b['source'], 'source_title': b['source_title'], 'text': b['text'][:300]},
+            # 阶段0 主体贯通（openfix）：claim 必须携带主体键。此前只带
+            # source/source_title/text，下游 contradiction_scorer._subject_key
+            # 读到空键 → same_subject 恒 True → keyed 路跨主体隔离在生产链路失效。
+            'claim_a': {'source': a['source'], 'source_title': a['source_title'],
+                        'text': a['text'][:300], 'entity': entity_name,
+                        # v2.1.2（F-06）：事件随 claim 穿透（保量上限 16，防报告膨胀）
+                        'events': (a.get('events') or [])[:16]},
+            'claim_b': {'source': b['source'], 'source_title': b['source_title'],
+                        'text': b['text'][:300], 'entity': entity_name,
+                        'events': (b.get('events') or [])[:16]},
             'severity': 'medium',
             'aliases_involved': list(dict.fromkeys(
                 _collect_mentions(a['text'], entity_name, alias_map)

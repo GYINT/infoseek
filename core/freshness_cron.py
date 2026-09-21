@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-core/freshness_cron.py — Infoseek 新鲜度 cron（v2.1.1 新增，v2.4.0 扩展）
+core/freshness_cron.py — Infoseek 新鲜度 cron（v2.1.1 新增，v2.2.0 维护）
 
-定期扫描实体元数据：
+定期扫描实体元数据（共 7 步）：
 1. 应用衰减（90 天半衰期）
-2. 冷条目 Wikidata 验证
-3. alias 生命周期扫描（v2.2.1）
-4. v2.4.0 新增：实体画像 stale 标注（90 天未出现自动 stale_profile=True）
-5. v2.4.0 新增：claim_store TTL 清理（180+ 天声明 decay）
-6. v2.0.0 收尾：learned 层冷/噪声实体清理（entities_learned.json，默认 dry_run 统计）
+2. 冷条目收集（>90 天未出现，待 Wikidata 验证）
+3. 冷条目 Wikidata 存在性验证（网络可用时；不可达自动降级）
+4. alias 生命周期扫描（v2.2.0 自动清理 stale alias）
+5. 实体画像 stale 标注（v2.2.0，90 天未出现自动 stale_profile=True）
+6. claim_store TTL 清理（v2.2.0 收尾，180+ 天声明 decay）
+7. learned 层冷/噪声实体清理（v2.0.0 收尾，默认 dry_run 统计；近期命中实体受 active_names 保护）
 
 CLI:
   python -m core.freshness_cron full-scan
@@ -127,19 +128,25 @@ class FreshnessCron:
 
         # 7) v2.0.0: learned 层冷/噪声实体清理（实体持久层生命周期收尾）
         # 默认 dry_run 只统计候选不删除（安全）；env INFOSEEK_LEARNED_PRUNE_APPLY=1
-        # 才真正原子落盘。近期仍命中（出现在 stale 列表之外）的冷条目受保护。
-        learned_prune_stats = {'candidates': 0, 'pruned': 0, 'remaining': 0, 'dry_run': True}
+        # 才真正原子落盘。近期仍命中（出现在 stale 列表之外）的冷条目受 active_names 保护。
+        learned_prune_stats = {'candidates': 0, 'pruned': 0, 'remaining': 0,
+                               'dry_run': True, 'applied': False}
         try:
-            from entities import prune_learned_entities
-            # dry_run 仅统计候选：active_names 传空（不删除，保护集合不影响候选统计）
+            from entities import prune_learned_entities, get_learned_entities
+            # 真实 active_names：全部 learned 实体名 − 当期 stale 名 → 近期仍命中者受保护，
+            # 避免空集合放行把所有冷条目一律判候选（D-1 安全收口，R1-a）。
+            _all = {e.get('name', '').lower() for e in get_learned_entities(force=True)}
+            _stale = {e.get('name', '').lower() for e in stale}
+            _active = _all - _stale
             _pr = prune_learned_entities(
                 max_age_days=180, min_confidence=0.3,
-                active_names=set(), dry_run=True)
+                active_names=_active, dry_run=True)
             learned_prune_stats = {
                 'candidates': len(_pr.get('candidates', [])),
                 'pruned': _pr.get('pruned', 0),
                 'remaining': _pr.get('remaining', 0),
                 'dry_run': _pr.get('dry_run', True),
+                'applied': _pr.get('applied', False),
             }
         except Exception:
             pass
@@ -163,6 +170,7 @@ class FreshnessCron:
             # v2.0.0 learned 层冷清理统计（默认 dry_run）
             'learned_prune_candidates': learned_prune_stats['candidates'],
             'learned_pruned': learned_prune_stats['pruned'],
+            'learned_prune_applied': learned_prune_stats.get('applied', False),
             'scan_time': 'cron',
         }
 

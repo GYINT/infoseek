@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-scripts/identity_confidence_fusion.py — 身份归因三因子置信度融合（v1.6.0 · P1/T4）
+scripts/identity_confidence_fusion.py — 身份归因四因子置信度融合（v1.7.0 · P1/T4 · HF-P1）
 
 在 infoseek 已有发现层（Maigret/Sherlock）与验证层（AccountTrustScorer）基础之上，
-将 A+B+C 三因子做联合置信度计算（此前三因子独立字段简单透传，未融合）：
+将 A+B+C（+D）因子做联合置信度计算（此前三因子独立字段简单透传，未融合）：
 
   A 多平台交叉命中  cross_platform_matches  发现层产出（同名账号在多个平台的命中数）
-  B 账号信任分      trust_score            AccountTrustScorer 四维人因评分（0-100）
+  B 账号信任分      trust_score            AccountTrustScorer 五维人因评分（0-100）
   C 站点权威        site_rank / tier       maigret rank 数值 + core/trust_sources 4 级白名单
+  D 协同簇强度      coord_cluster_* / sync_group_size   FakeDetect 发现层产出（HF-P1 新增；
+                    coord_clusters 密度/规模 + 时序同步组规模，复用 CROSS_SOURCE_BOOST 语义）
 
 融合方法（weighted_sum）：
   confidence_final = Σ w_i · norm_i ，缺失因子动态重归一化剩余权重（保证 Σw=1）
 
-向后兼容承诺（不破坏原有能力）：
-  - 新增输出字段（confidence_final / fusion / verdict_final / confidence_label*）
+HF-P1 向后兼容承诺（**零回归**）：
+  - 默认权重 a:b:c 比例**保持 7:8:5**（= 旧 0.35:0.40:0.25），故「无 D 信号」时结果与旧版**逐点一致**；
+    D 因子仅在调用方提供协同簇信号时参与（权重默认 0.20），缺失自然不出现。
+  - 新增输出字段（confidence_final / fusion / verdict_final / confidence_label* / d_cluster）
   - 绝不覆盖原 confidence / trust_score / verdict / verdict_cn / trust_confidence
   - 任意因子缺失或模块异常 → 降级（fusion_degradation 标注），不抛异常中断链路
+  - INFOSEEK_FUSION_WEIGHTS 兼容旧 3 值（映射 a/b/c，d=0）与新 4 值（a,b,c,d）
 
 可配置：
   INFOSEEK_FUSION_ENABLED   0 关闭融合（输出无融合字段）；默认 1
-  INFOSEEK_FUSION_WEIGHTS   逗号分隔三权重，如 '0.35,0.40,0.25'；非法/缺省回退默认
+  INFOSEEK_FUSION_WEIGHTS   逗号分隔 3 或 4 权重，如 '0.28,0.32,0.20,0.20'；非法/缺省回退默认
 
 用法：
     from identity_confidence_fusion import fuse_anchor, fuse_confidence
@@ -38,8 +43,13 @@ from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger("infoseek.identity_fusion")
 
-# ── 默认权重（A 多平台交叉 : B 信任分 : C 站点权威）──
-DEFAULT_WEIGHTS: Dict[str, float] = {"a": 0.35, "b": 0.40, "c": 0.25}
+# ── 默认权重（HF-P1 四因子：A 平台交叉 : B 信任分 : C 站点权威 : D 协同簇强度）──
+# 关键约束：a:b:c == 0.28:0.32:0.20 == 7:8:5 == 旧 0.35:0.40:0.25（**比例不变**），
+# 故「无 D 信号」时三因子重归一化结果与旧版逐点一致 → 零回归。D 校准初值 0.20（待真实样本）。
+DEFAULT_WEIGHTS: Dict[str, float] = {"a": 0.28, "b": 0.32, "c": 0.20, "d": 0.20}
+# HF-P1 推荐四因子校准配置（= DEFAULT_WEIGHTS，显式命名供真实样本校准替换）
+FUSION_SCHEMA = "a/b/c/d"
+WEIGHT_KEYS = ("a", "b", "c", "d")
 
 # ── 交叉命中归一化分段（n → 归一值；缺失/0 → 中性 0.4，不惩罚单体存在）──
 CROSS_STEPS: List[Tuple[int, float]] = [
@@ -57,6 +67,18 @@ RANK_STEPS: List[Tuple[int, float]] = [
 NORM_NEUTRAL = 0.5     # 因子缺失时的中性分
 A_NEUTRAL = 0.4
 
+# ── D 因子 协同簇强度分段（HF-P1：复用 CROSS_SOURCE_BOOST 语义的群体证据）──
+#  协同簇规模（FakeDetect coord_clusters.size，密度 > 0.25 的 Louvain 社区）
+#  簇密度（coord_clusters.density，0-1）
+#  时序同步组规模（sync_groups.size）
+CLUSTER_SIZE_STEPS: List[Tuple[int, float]] = [
+    (0, 0.0), (1, 0.30), (3, 0.60), (5, 0.80), (8, 1.00),
+]
+SYNC_SIZE_STEPS: List[Tuple[int, float]] = [
+    (0, 0.0), (2, 0.40), (4, 0.70), (6, 1.00),
+]
+CLUSTER_DENSITY_MIN = 0.25     # 与 FakeDetect coord_clusters 判定阈值一致
+
 # ── 融合置信度标签 ──
 LABEL_STEPS: List[Tuple[float, str, str]] = [
     (0.75, "high", "高置信"),
@@ -71,7 +93,11 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def _load_weights() -> Dict[str, float]:
-    """读取融合权重（env INFOSEEK_FUSION_WEIGHTS='a,b,c'），非法回退默认。"""
+    """读取融合权重（env INFOSEEK_FUSION_WEIGHTS），非法回退默认。
+
+    兼容 3 值（旧契约 'a,b,c' → d=0，D 因子不参与，行为同旧版）与
+    4 值（新契约 'a,b,c,d'，HF-P1 四因子）。
+    """
     raw = os.environ.get("INFOSEEK_FUSION_WEIGHTS", "").strip()
     if not raw:
         return dict(DEFAULT_WEIGHTS)
@@ -81,10 +107,11 @@ def _load_weights() -> Dict[str, float]:
     except ValueError:
         log.warning("[融合] INFOSEEK_FUSION_WEIGHTS 非法，使用默认权重")
         return dict(DEFAULT_WEIGHTS)
-    if len(vals) != 3 or any(v < 0 or v > 1 for v in vals) or sum(vals) <= 0:
-        log.warning("[融合] INFOSEEK_FUSION_WEIGHTS 值域异常，使用默认权重")
+    if len(vals) not in (3, 4) or any(v < 0 or v > 1 for v in vals) or sum(vals) <= 0:
+        log.warning("[融合] INFOSEEK_FUSION_WEIGHTS 值域/个数异常，使用默认权重")
         return dict(DEFAULT_WEIGHTS)
-    return {"a": vals[0], "b": vals[1], "c": vals[2]}
+    return {"a": vals[0], "b": vals[1], "c": vals[2],
+            "d": (vals[3] if len(vals) == 4 else 0.0)}
 
 
 def fusion_enabled() -> bool:
@@ -160,6 +187,46 @@ def norm_trust(trust_score: Optional[float]) -> Tuple[float, str]:
         return None, "missing"  # type: ignore[return-value]
 
 
+def _step_norm(n: int, steps: List[Tuple[int, float]]) -> float:
+    """分段归一：取首个 n <= thr 的 val；n 超过最大 thr → 末段 val。"""
+    for thr, val in steps:
+        if n <= thr:
+            return val
+    return steps[-1][1]
+
+
+def norm_cluster(cluster_size: Optional[int] = None,
+                 cluster_density: Optional[float] = None,
+                 sync_size: Optional[int] = None) -> Tuple[Optional[float], str]:
+    """D 因子（HF-P1）：协同簇强度 → 0-1；**无任何信号 → None**（不参与，保持旧行为）。
+
+    三路信号取最大（互补证据，复用 CROSS_SOURCE_BOOST 的群体证据语义）：
+      - cluster_size    : 协同簇规模（FakeDetect coord_clusters 成员数）
+      - cluster_density : 簇密度（0-1，>= CLUSTER_DENSITY_MIN 才计入）
+      - sync_size       : 时序同步组规模（sync_groups 成员数）
+    聚众协同（水军集群）证据越强 → 归一值越高。
+    """
+    vals: List[float] = []
+    for raw, steps in ((cluster_size, CLUSTER_SIZE_STEPS), (sync_size, SYNC_SIZE_STEPS)):
+        if raw is None:
+            continue
+        try:
+            n = max(0, int(raw))
+        except (TypeError, ValueError):
+            continue
+        vals.append(_step_norm(n, steps))
+    if cluster_density is not None:
+        try:
+            d = float(cluster_density)
+            if d >= CLUSTER_DENSITY_MIN:
+                vals.append(_clamp(d))
+        except (TypeError, ValueError):
+            pass
+    if not vals:
+        return None, "missing"  # type: ignore[return-value]
+    return round(max(vals), 4), "ok"
+
+
 # ═══════════════════════════════════════════════════════════════
 # 融合计算
 # ═══════════════════════════════════════════════════════════════
@@ -168,11 +235,15 @@ def fuse_confidence(cross: Optional[int] = None,
                     trust_score: Optional[float] = None,
                     site_rank: Optional[int] = None,
                     url: str = "",
+                    cluster_size: Optional[int] = None,
+                    cluster_density: Optional[float] = None,
+                    sync_size: Optional[int] = None,
                     weights: Optional[Dict[str, float]] = None) -> Dict:
-    """A+B+C 三因子联合置信度计算。
+    """A+B+C(+D) 四因子联合置信度计算（HF-P1）。
 
-    缺失因子动态重归一化剩余权重（fusion_degradation 标注缺失因子），
-    全部缺失 → 中性 0.5 + degradation=all-missing（不抛异常）。
+    缺失因子动态重归一化剩余权重（fusion_degradation 标注缺失因子）；
+    D 因子无信号时不进入 factors/present（保持旧三因子逐点结果，零回归）；
+    全部缺失 → 中性 + degradation（不抛异常）。
     """
     w = weights or _load_weights()
     factors: Dict[str, Dict] = {}
@@ -185,6 +256,14 @@ def fuse_confidence(cross: Optional[int] = None,
     c, c_st = norm_site(url, site_rank)
     factors["c_site"] = {"raw": {"url": url, "site_rank": site_rank},
                          "norm": round(c, 4), "status": c_st}
+    # D 因子（协同簇强度）：仅在有信号时进入，缺失不列入 degradation（保持旧三因子语义）
+    # 方向：协同簇越强 → 越可疑 → 以「非协同」互补证据 (1 - d) 参与加权（高 conf = 可信真人）
+    d, d_st = norm_cluster(cluster_size, cluster_density, sync_size)
+    if d is not None:
+        factors["d_cluster"] = {
+            "raw": {"cluster_size": cluster_size,
+                    "cluster_density": cluster_density, "sync_size": sync_size},
+            "norm": round(d, 4), "contribution": round(1.0 - d, 4), "status": d_st}
 
     present = {"a": a}
     if b is not None:
@@ -192,9 +271,11 @@ def fuse_confidence(cross: Optional[int] = None,
     else:
         log.debug("[融合] B 因子缺失（验证层未启用），动态重归一化")
     present["c"] = c
+    if d is not None:
+        present["d"] = 1.0 - d      # 互补证据：协同簇越强 → 身份置信越下调
 
-    w_sum = sum(w[k] for k in present)
-    conf = sum(w[k] * v for k, v in present.items()) / max(w_sum, 1e-9)
+    w_sum = sum(w.get(k, 0.0) for k in present)
+    conf = sum(w.get(k, 0.0) * v for k, v in present.items()) / max(w_sum, 1e-9)
     conf = round(_clamp(conf), 4)
 
     label_en, label_cn = _label(conf)
@@ -219,11 +300,21 @@ def _label(conf: float) -> Tuple[str, str]:
     return "critical", "极低置信"
 
 
+def _pick(d: Dict, *keys):
+    """按序取首个非 None 值（字段别名兼容）。"""
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def fuse_anchor(acc: Dict, username: str = "") -> Dict:
     """单账号融合入口：原字段透传 + 附加融合字段（不覆盖任何原字段）。
 
     输入：发现层/验证层账号条目（可含 cross_platform_matches / trust_score /
-          site_rank / url / verdict 等）。
+          site_rank / url / verdict，以及 HF-P1 协同簇字段
+          coord_cluster_size / coord_cluster_density / sync_group_size 等）。
     输出：dict 副本，新增 confidence_final / confidence_label / confidence_label_cn /
           fusion / fusion_degradation / verdict_final。
     开关关闭或异常 → 原样返回（降级，不中断）。
@@ -236,6 +327,9 @@ def fuse_anchor(acc: Dict, username: str = "") -> Dict:
             trust_score=acc.get("trust_score"),
             site_rank=acc.get("site_rank"),
             url=acc.get("url") or "",
+            cluster_size=_pick(acc, "coord_cluster_size", "cluster_size"),
+            cluster_density=_pick(acc, "coord_cluster_density", "cluster_density"),
+            sync_size=_pick(acc, "sync_group_size", "sync_size"),
         )
         out = dict(acc)
         out["confidence_final"] = res["confidence_final"]

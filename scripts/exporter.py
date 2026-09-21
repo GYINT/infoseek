@@ -64,6 +64,22 @@ def to_json(report: dict, indent: int = 2) -> str:
     return json.dumps(report, ensure_ascii=False, indent=indent)
 
 
+def _csv_safe(value):
+    """DEF-14（v2.1.1 P2）：CSV 公式注入防护。
+
+    电子表格把 =、+、-、@、Tab、CR 开头的单元格当公式执行（=HYPERLINK/=cmd|...），
+    即使 QUOTE_ALL 包裹也会触发。首字符命中时前置单引号强制文本；数值型不处理。
+    """
+    if value is None:
+        return ''
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value)
+    if text and text[0] in ('=', '+', '-', '@', '\t', '\r'):
+        return "'" + text
+    return text
+
+
 def to_csv(report: dict) -> str:
     """导出为 CSV（锚点列表）"""
     import csv
@@ -78,12 +94,12 @@ def to_csv(report: dict) -> str:
     for i, a in enumerate(anchors, 1):
         writer.writerow({
             'idx': i,
-            'title': (a.get('title', '') or '')[:80],
-            'url': a.get('url', ''),
-            'platform': a.get('platform', ''),
+            'title': _csv_safe((a.get('title', '') or '')[:80]),
+            'url': _csv_safe(a.get('url', '')),
+            'platform': _csv_safe(a.get('platform', '')),
             'score': a.get('score', 0),
             'credibility': a.get('credibility', 0),
-            'domain': report.get('domain', ''),
+            'domain': _csv_safe(report.get('domain', '')),
         })
 
     return buffer.getvalue()
@@ -199,13 +215,13 @@ def to_traced_csv(report: dict) -> str:
         writer.writerow({
             'idx': i,
             'ref_id': a.get('ref_id', i),
-            'title': (a.get('title', '') or '')[:80],
-            'url': a.get('url', ''),
-            'platform': a.get('platform', ''),
+            'title': _csv_safe((a.get('title', '') or '')[:80]),
+            'url': _csv_safe(a.get('url', '')),
+            'platform': _csv_safe(a.get('platform', '')),
             'score': a.get('score', 0),
             'credibility': a.get('credibility', 0),
-            'via_refs': '|'.join(str(r) for r in a.get('via_refs', [])),
-            'domain': report.get('domain', ''),
+            'via_refs': _csv_safe('|'.join(str(r) for r in a.get('via_refs', []))),
+            'domain': _csv_safe(report.get('domain', '')),
         })
 
     return buffer.getvalue()

@@ -1,30 +1,30 @@
 {
-  "version": "1.0.1",
-  "generated_at": "2026-09-17 01:01 UTC",
-  "scale": 3000,
+  "version": "2.2.0",
+  "generated_at": "2026-09-20 16:06 UTC",
+  "scale": 1000,
   "rounds": 3,
   "metrics": {
     "score_sec": [
-      4.1,
-      0.6,
-      0.6
+      6.9,
+      1.5,
+      1.5
     ],
     "conflict_sec": [
-      41.4,
-      39.1,
-      39.3
+      42.3,
+      40.8,
+      41.0
     ],
     "research_2k_sec": [
-      83.6,
-      83.6,
-      83.3
+      127.1,
+      124.8,
+      126.7
     ],
-    "score_p50": 0.6,
-    "score_p95": 3.7,
-    "conflict_p50": 39.3,
-    "conflict_p95": 41.2,
-    "research_p50": 83.6,
-    "research_p95": 83.6
+    "score_p50": 1.5,
+    "score_p95": 6.4,
+    "conflict_p50": 41.0,
+    "conflict_p95": 42.2,
+    "research_p50": 126.7,
+    "research_p95": 127.1
   },
   "conflicts_detected": 14,
   "note": "P50/P95 需 rounds≥3；单轮时 metrics 为逐轮原始值"

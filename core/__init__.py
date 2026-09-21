@@ -30,7 +30,7 @@ core/ — Infoseek 核心层（v3.1.0）
 - 不向后兼容的方法须明确 deprecation warning
 """
 
-__version__ = "2.1.0"  # 单源对齐 scripts/mcp_tools_common.py:SKILL_VERSION（v1.8.1 治理）
+__version__ = "2.2.0"  # 单源对齐 scripts/mcp_tools_common.py:SKILL_VERSION（v1.8.1 治理）
 __all__ = [
     "anchor_score_v2",
     "claim_store",

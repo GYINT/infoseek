@@ -42,7 +42,7 @@ SERVER_NAME = "infoseek-search"
 #   · algo-v  算法与结果体版本（infoseek_core_v2 返回体 'version': '1.2.0'）
 #   · proto-v 协议版本（PROTOCOL_VERSION = MCP 协议；v3.0.0 = 流式 yield 协议）
 # 一致性由 tests/test_version_single_source.py 守护。
-SKILL_VERSION = "2.1.0"
+SKILL_VERSION = "2.2.0"
 
 SERVER_VERSION = SKILL_VERSION  # MCP serverInfo.version（对外协议应答，随真源）
 

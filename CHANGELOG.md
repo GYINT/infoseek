@@ -1,5 +1,254 @@
 # Changelog
 
+## [2.2.0] - 2026-09-19（GA11 事件槽批次阶段 1-3：三元事件身份 + 跨文本时间槽键 + LLM 路径收口）
+
+> 触发：v2.1.2 落地事件抽取（F-06）/ 期间裁决（F-04）/ time 路主体闸（F-07）后，跨文本对齐仍用
+> `event_sig=(subject, aspect)` 二元键，不同时间期间的同主体同方面事件无法在事件层区分；且 LLM
+> 成功路径返回窄白名单 dict，截断 v2.1.2/v2.2.0 全部事件槽字段。本批完成时间维度身份升级与全路径
+> 字段收口。跨 2 核心模块 + 守护新增独立 LLM 字段套件（26 断言），按版本规则 **MINOR 2.1.2 → 2.2.0**。
+
+### 阶段 1 · 事件身份规范化（time_key + 多 span 扇出）
+- 事件 schema 增加稳定 **`time_key`**（`{start,end,label}` 规范化：半开 `[start,end)`，label 缺失填 `na`）。
+- 单句含多个时间 span 时事件按 span **扇出**（不再只取 `spans[0]`），每事件绑定其归属期间。
+- 跨文本事件签名升级为三元 **`(subject, aspect, time_key)`**（`event_slot_keys` 透出排序后的
+  `subject|aspect|time_key`）。
+- **三类键严格分离**：跨文本事件身份 `(subject, aspect, time_key)` ／ 单侧事实去重
+  `(subject, aspect, str(value), polarity, time_label)` ／ 时间关系用真实 `time_span` 半开区间。
+
+### 阶段 2 · 跨文本时间槽键升级（`_event_time_score` + 多期间明细）
+- 事件层对拍改三元身份：同键（同主体+同方面+同 time_key）才对拍；不同 time_key 的同主体同方面事件
+  按真实 `[start, end)` 半开区间对拍，**任一事件对 overlap → 0 分 conflict**；全部 disjoint 时
+  label 含 `Q`/`月` 给 60、否则 35。
+- 端点相接视为 disjoint；任一侧 span 缺失保守不误判（`_slots_disjoint` 返 False）。
+- 透出 `event_disjoint_slots` / `event_overlap_slots`（排序 aspect 列表）与逐对 `event_pairs`。
+- 期间裁决保留**多期间逐对明细** `period_pair_details`；`period_disjoint_slots`/`period_overlap_slots`
+  双列透出。
+
+### 阶段 3 · B 层 LLM 与全调用路径收口
+- B 层 LLM 槽表增加时间维度：`_llm_slot_span` 解析 `time_start/time_end`（4 位年份区间转半开，模糊返 None），
+  `_llm_slot_conflicts` 按 B 层 `(subject, aspect)` 建索引，真实 span 可解析且 disjoint → suppression 不计冲突。
+- **字段截断根治（关键修复）**：同步 `score_with_llm` 成功分支原返回窄白名单 dict（仅 7 字段），
+  截断全部 v2.2.0 事件/期间/keyed 字段；改为以**完整 A 层 `dict(local)` 为底**，仅覆盖
+  score/severity/reasons/neg_hits/llm_used/llm_raw，并 `setdefault` 两个 suppression 空列表。
+  同步 None 降级 / 异常降级、async 成功/None/异常三出口、hybrid 三出口统一为同一模式。
+- `score_contradictions_batch_async` 经 `asyncio.gather` 原样聚合；下游 `conflict_v3` /
+  `mcp_tools_async` / `infoseek_core_v2` / `infoseek_mcp_server`（同步直调 + async wrapper）
+  审计均**原样透传、无白名单过滤**。
+- 纯 A 层默认挂载 `llm_time_suppressed=[]` / `llm_time_suppressed_slots=[]`；顶层成功挂载
+  `event_overlap_slots`，顶层 except 兜底事件字段齐备。
+
+### 守护与回归
+- `tests/test_event_slots_v220.py` 扩至 **54 PASS / 0 FAIL**（含三元 event_sig、多 span 扇出、
+  半开 disjoint、同步/异步 LLM 全路径字段齐备性）。
+- 全量回归 `python tests/run_tests.py`：**67 PASS / 0 SKIP / 0 FAIL（231s）ALL GREEN**。
+- 版本联动 6 处：`mcp_tools_common.SKILL_VERSION`（唯一真源）/ SKILL.md / manifest.yaml /
+  package.json / README（标题+badge）；代码内 `v2.1.2` 历史标注为历史锚点不改。
+- B 层 LLM 仍默认关闭（`INFOSEEK_CONTRADICTION_LLM=1` 启用）；不推送 GitHub（默认）。
+
+## [2.1.2] - 2026-09-19（GA11 事件槽批次：F-06 事件抽取 + F-04 期间裁决 + F-07 time 路主体闸）
+
+> 触发：P3 三缺口（F-06 多事实句召回 / F-04 相邻季语义裁决 / F-07 time 路跨主体时间误报）
+> 的**主体前置依赖**已由 2.1.1-openfix-p3stage0（主体贯通）解除，本批按 GA11 事件槽重构
+> 阶段 1-3 顺序落地。A 层零依赖；B 层 LLM 槽维持默认关闭（`INFOSEEK_CONTRADICTION_LLM=1` 才启用）。
+> 改动跨 3 个模块（矛盾评分 / 冲突检测 / research 链路）+ 1 套新增守护 + 1 处既有断言语义更新
+> （含公共函数签名扩展），按版本规则 **PATCH 位 2.1.1 → 2.1.2**。
+> 新增守护 `tests/test_event_slots_v220.py`（47 断言 / 5 组；文件名沿用批次立项名 v220）。
+
+### F-06 · 事件抽取（新增 `_split_clauses` / `_extract_events`）
+- 零依赖事件抽取：先按标点分句（`。！？；;!?\n`；英文句号须后接空白，避小数点误切），再逐句抽事件
+  `{subject, aspect, value, polarity, time_span, event_sig}`。
+- `event_sig = f'{subject}|{aspect}'`——跨文本对齐键，**时间不进入 sig**（时间是对齐后的裁决维度）。
+- **修多事实句召回缺口（F-06 原始定义）**：数值/方面归属由「全文单次扫描 + 就近唯一归属」改为
+  **句内独立归属**，多事实句不再跨句串味（「Q1 营收…。Q3 利润…」两句各归各的期间与方面）。
+- 有界预算：`_EVENT_MAX_CHARS=5000` / `_EVENT_MAX_CLAUSES=24` / `_EVENT_MAX_EVENTS=40`；
+  任何解析异常静默降级为空列表，不击穿主评分链。
+- **claim 穿透（关键）**：`conflict_v3._extract_fact_claims` 在**原始正文**上抽 events（先于
+  `text[:500]` 截断），`_group_and_detect` 随 `claim_a/claim_b` 携带（跨越 `text[:300]` 二级截断，
+  上限 16 条/claim）。否则 scorer 只能从截断文本重抽，事件必丢。
+
+### F-04 · 期间裁决（新增 `_period_adjudicate`）
+- 同主体、同方面，双方期间**均已知且不相交** → 判为非冲突；期间相同 / 相交 / 任一缺失
+  → 走现值冲突规则。
+- 落地为**降权**而非滤除：`total = max(1, round(total × _PERIOD_DISJOINT_DAMP))`（DAMP=0.5，
+  **只降权、不滤除、不归零**），`reasons` 追加期间裁决说明，返回新增
+  `period_disjoint_slots` / `period_adjudication`（`disjoint|overlap|none`）。
+- 触发条件**严格三连**：`subj_a == subj_b 且均非空` + `aspect 相同` + `双方 time_span 均非空且不相交`
+  —— **空主体不裁决**（保持旧契约，避免通配误伤既有语料）。
+
+### F-07 · time 路主体闸 + 事件级对齐（改 `time_slot_score`）
+- 签名扩展：`time_slot_score(text_a, text_b, subject='', subject_b=None, events_a=None, events_b=None)`；
+  **旧 2 参调用完全兼容**（任一主体缺失 → 沿用全文级逻辑，零回归）。
+- 双方主体已知且相等 → **事件级对齐**（仅同主体同方面事件对参与裁决，新增 `_event_time_score`）；
+  主体已知但不等 → 跨主体 → 不可对拍（`coverage='partial'`，**消除 F-07 跨主体时间误报**）。
+- `score_contradiction` 内调用升级为传主体 + 事件；claim 无 `events` 时**就地兜底抽取**
+  （直调 / 旧调用兼容）。新增返回字段 `event_count_a/b`、`time_mode`。
+
+### research 链路字段穿透对齐
+- 单条冲突字段由「仅 `semantic_score`/`severity`」补齐为与同步路一致：`verdict` / `time_coverage` /
+  `keyed_score` / `conflict_slots` / `period_adjudication`（两个异步 `_conflict*()` 块 + 同步块统一）。
+
+### 零回归论证（实测锚点）
+- **唯一行为变化点**：双方主体非空且相等 + 同方面事件对双方期间非空且不相交
+  （`test_p1_hardening_v211` L105-109 语料 `entity='甲'`）→ 60 → 30；该断言按 F-04 语义更新，
+  并补「同期间不降权」「跨主体不误报」两例。
+- 其余既有语料均不满足严格三连，判定不变：`test_p2_v211`（无主体 → 85）、`test_open_fixes`
+  06-15（无主体 → mode=time / 60）、06-18（有主体但无时间）、`test_subject_threading` C4/C5（无时间）、
+  `test_correctness` L1-03（无主体）。
+
+### 验证
+- 新增 `tests/test_event_slots_v220.py`：**47 PASS / 0 FAIL**
+  （A 事件抽取 15 / B 期间裁决 11 / C time 路 10 / D claim 穿透 5 / E 零回归 6）。
+- 定向回归（15 套件受影响面）全绿。
+- 全量回归：**65 PASS / 2 SKIP / 0 FAIL / 0 TIMEOUT**（67 套件，87.9s；
+  2 SKIP = jieba/pypinyin 可选依赖缺失）。
+
+## [2.1.1-openfix-p3stage0] - 2026-09-18（P3 阶段0 主体贯通 · openfix，版本号不变）
+
+> 触发：P3 三缺口审计（F-04 相邻季 / F-06 多事实句 / F-07 time 路跨主体）时
+> 代码级实锤的**生产链路主体键恒为空**——GA11 keyed 路「跨主体隔离」在生产路径
+> 实际从未启用。该错配是 F-07 修复的硬前置，按「变更隔离」原则从 v2.2.0 事件槽
+> 批次中剥离单独落地（openfix，**不 bump 版本**，与 2.1.0-openfix 批同例）。
+> 新增守护 `tests/test_subject_threading_v211.py`（21 断言 / 4 组）。
+
+### 根因链（三处脱节，非单点 bug）
+1. `core/conflict_v3.py::_extract_fact_claims` 产出 claim **带** `entity_name`（NER 口径）；
+2. 同文件 `_group_and_detect` L148-149 构造 `claim_a`/`claim_b` 时只取
+   `{source, source_title, text}`，**丢掉实体** → 实体信息在此断链；
+3. `core/contradiction_scorer.py::_subject_key` 只读 `claim.entity` / `claim.subject`，
+   **不读 `entity_name`** → 双重脱节使主体键恒为 `''`；
+4. 后果：`same_subject = (subj_a == subj_b) or subj_a == "" or subj_b == ""` 中
+   空键分支恒真 → 任意两条声明都被视为「同一主体」参与键控比对。
+
+### 修复（两处，零行为风险）
+- **① 真源注入** `conflict_v3._group_and_detect`：`claim_a`/`claim_b` 补
+  `'entity': entity_name`。一处修复覆盖生产链三个调用点
+  （`infoseek_core_v2.py` L711 同步路 / L889 / L1148 异步路）。
+- **② 契约扩展** `contradiction_scorer._subject_key`：读取字段由
+  `('entity', 'subject')` 扩为 `('entity', 'subject', 'entity_name')`，
+  优先级 entity > subject > entity_name（显式契约字段优先，NER 字段兜底）。
+
+### 零回归论证
+- 生产链候选在 `conflict_v3:131` 已按 `entity_name` 同实体分组，配对双方**本就同实体**；
+  修复前是「两个空键」、修复后是「两个相同实体键」，`same_subject` 恒为 True 的**判定结果不变**
+  （守护 D1 直接对拍证明）。
+- 唯一行为变化：**跨主体声明对不再被误判为同主体比对**——方向正确（消除假阳性）。
+- 无 `entity` 的旧式直调（MCP 工具 `score_contradiction` 传入裸 claim）
+  保留空键通配旧契约，不引入主体猜测（守护 B4/B5/D3）。
+
+### 验证
+- 新增 `tests/test_subject_threading_v211.py`：21 PASS / 0 FAIL
+  （A 契约 7 / B keyed 隔离 5 / C 生产链贯通 6 / D 零回归 3）。
+- 全量回归：**64 PASS / 2 SKIP / 0 FAIL / 0 TIMEOUT**（66 套件 91.4s，较 2.1.1 的 63 套件新增本守护套件）。
+
+### 下游影响
+- 解除 v2.2.0 事件槽批次（阶段1 事件抽取 / 阶段2 期间裁决 / 阶段3 time 路收口）的
+  主体前置依赖；阶段3 给 time 路加主体闸（F-07）将直接站在本批贯通的实体之上。
+
+## [2.1.1] - 2026-09-18（边界审计 P2 四项硬化：detect_domain 守卫 + legacy 有界截断 + 渲染/CSV 注入清洗 + 中文短词边界）
+
+> 触发：v2.1.0 边界审计报告《infoseek_v210_P1硬化与P2P3规划报告》§三 立案的 P2 四项，
+> 本轮按规划自主落地。改动横跨 4 个模块（路由/矛盾评分/渲染/导出）+ 词表 schema 扩展
+> （strict_keywords/false_compounds）+ 新增安全清洗管线，改动幅度 >30%（新增 2 个公共纯函数、
+> 1 个误嵌判定函数、词表双字段），按版本规则 **PATCH 位 2.1.0→2.1.1**。
+> 新增守护 `tests/test_p2_v211.py`（70 断言，4 组正反样本对拍）。
+
+### DEF-13 · detect_domain 入参类型守卫（原 AttributeError）
+- `domain_router.detect_domain` 入口对 None/数字/其它非字符串归一（None→''，其余→str()），
+  空输入走既有「无触发词→domain=None/is_default」分支。旧代码 `subject.lower()` 直崩，
+  上游 score_source 虽有 try/except 兜底，但 detect_domain 是公开函数，MCP 工具/新调用点直调会崩。
+- 验收：None/123/0/''/'   '/3.14/[...] 均返回 is_default 结构；正常金融/技术路由零回归。
+
+### DEF-15 · legacy 短语袋路有界截断（原 500k 长文本 timeout >150s）
+- 新增 `_slot_window(text)`：非字符串归一 + 截断到 `_KEYED_MAX_CHARS`(50k)。
+  `_extract_slots` 与 `_detect_negation` 统一接入，使 score_contradiction 的三路
+  （keyed L394 / time L553 / legacy）窗口一致——此前仅 legacy 路全文线性展开 2-gram 无界。
+- 实测：500k 多样长文本 `_extract_slots` >150s 超时 → **0.07s**，score_legacy → **0.14s**（<15s）；
+  截断结果与手工前 50k 完全等价；真实矛盾（2024Q1↔2025Q3）仍判 conflict 零回归。
+  legacy 只取弱信号 2-gram，50k 之后长文本本就稀释，近零信息损失。
+
+### DEF-14 · 报告输出层注入清洗 + CSV 公式注入防护（原 autoescape=False 注入面，无 SSTI）
+- `domain_orchestrator` 新增 `sanitize_markdown_input()`：移除 script/iframe/object/embed/svg/
+  img/link/meta/style 等危险标签，摘除标签内 `on*=` 事件属性（双/单/裸引号三种写法），
+  中和 markdown 链接/裸 URL 的 `javascript:`/`data:`/`vbscript:` 危险协议。
+  **保留正常 Markdown**（`<details>`、`https` 链接、中文、表格、`a=b+c` 公式），不转义有意排版。
+- 接线：渲染用 subject 清洗副本（路由 detect/评分仍用原始 subject，语义匹配不变）；
+  rendered_sources 的 title/url/platform/snippet/text_excerpt 与 filtered_out 外部字段渲染前清洗；
+  Jinja2→simple→fallback 三条渲染路径全覆盖。内部自生成 filter_block（自有 details）不过清洗。
+- `exporter` 新增 `_csv_safe()` 并接入 to_csv/to_traced_csv：首字符为 `= + - @ Tab CR`
+  的单元格前置单引号（OWASP CSV injection，=HYPERLINK/=cmd| 即使 QUOTE_ALL 包裹仍触发）；
+  数值型分数不处理（实测 72 原样输出）。
+- 已实测确认无 SSTI（`{{7*7}}` 不求值，模板预编译固定）；仓内无报告 Markdown→HTML 渲染器，
+  本防护消除外部消费方的输出层注入面。
+
+### DEF-16 · 中文歧义短词边界守卫（原「工业来回测试平台」误判 finance，零金融语义）
+- 根因：`_keyword_hit` 只对 ASCII 短缩写（≤4 位）走正则词边界，中文词一律裸 `kw in subject` 子串，
+  「来回测试」含「回测」片段 → best=finance-research(score=1.0)。
+- 修法（报告方案 A+B）：
+  - 域配置新增 `strict_keywords`（仅实证高置信项 `['回测']`）与 `false_compounds`
+    （`['来回测试','回测设备']`，含该词的非金融常用多字词）；
+  - 新函数 `_all_occurrences_embedded()`：2 字 strict 词命中时，若其**每次出现**都被某个
+    false_compound 区间覆盖则不命中，**至少一次干净出现**仍命中（区间覆盖判定，非简单否定）；
+  - 长词（≥3 字：市盈率/布林带）误嵌概率低，保留子串；其余 2 字词无实证误例不入 strict（零过杀）。
+- 双源同步：`references/keyword.yaml`（唯一真源）+ 内置 `_BUILTIN_TRIGGERS`（兜底）均加两字段，
+  `_load_domain_triggers` 解析（缺失回退空集）；yaml 缺失走内置时同样生效。
+- 验收正反 7 例：真「自动化回测交易系统/量化策略回测平台」命中；「工业来回测试平台/
+  回测设备的研发与制造/来回测试自动化设备」finance=0；混合「来回测试后再做回测」仍命中；
+  ASCII 边界（PE 不命中 openai/GPT 正常命中 tech）零回归；其余 4 域路由不变。
+
+### P3（本批不做，维持规划，随 GA11 事件槽重构统一处理）
+- 多事实句召回（F-06，全文单次扫描归属局限）；相邻季语义裁决（F-04）；
+  time 路跨主体时间误报（F-07，需把 entity 传入 time_slot_score，接口级改动）。
+
+## [2.1.0-openfix-p1] - 2026-09-18（边界审计 P1 四项硬化：类型保护 + bool 排除 + 渲染兜底 + 矛盾路 None 防护，**版本号不变**）
+
+> 触发：v2.1.0 边界案例审计（113 例矩阵）探针坐实的 P1 崩溃面。本批为**缺陷硬化**，
+> 改动集中在 3 个文件的入参容错，无对外工具契约/CLI 变更，改动幅度 <10%，
+> 按版本规则**不 bump**。新增守护 `tests/test_p1_hardening_v211.py`（41 断言）；
+> 全量回归 **62 PASS / 2 SKIP（jieba/pypinyin 可选依赖）/ 0 FAIL / 0 TIMEOUT**（64 套件，83.5s）。
+
+### P1-1 · score 入参类型保护（DEF-09，原探针实测 TypeError 崩溃）
+- `score_source` 新增唯一入口 `_coerce_incoming_score(raw)`：
+  字符串脏分（`'0.72'`/`'72'`）先 `float()` 转换再走同一量纲判定，不再穿透到
+  `base_score <= 0` 比较抛 TypeError 打挂整条评分链；非数值串（`'abc'`）/None/其它类型
+  归 0 并标记新字段 `score_invalid=True`，交既有 semantic_fallback/empty 链按缺分处理。
+  NaN/Inf 显式归零，防 NaN 向下游报告传播。
+- **bool 排除（DEF-08）**：bool 是 int 子类，旧逻辑 `True` 命中 `(0,1]` 被误归一为 100；
+  现 bool 一律按缺分 0、不参与归一（布尔更可能是标志位而非评分）。
+- 零回归：P0-OPEN-04 数值契约不变（0.72→72、1→100、72→72、0→empty）。
+
+### P1-2 · 矛盾评分 None / 非字符串防护（F-12，原探针实测 AttributeError 崩溃）
+- `score_contradiction` 入口统一 `_claim_text` 归一：dict 但 `text=None`/数字 → 空串
+  （不再当 `'None'`/`'123'` 字面量伪造矛盾）；非 dict 的 None → ''，其余非 dict 仍 `str()`。
+  旧代码 `text=None` 直传未 try 包裹的 `score_legacy`，在 `None.strip()` 处崩溃。
+- `time_slot_score`（公开函数）补类型守卫，外部直调 None 不崩。
+- 真实矛盾检出零回归（2024Q1↔2025Q3 仍判 conflict 60）。
+
+### P1-3 · 报告渲染兜底（G-04/G-05，原探针实测 AttributeError 崩溃）
+- `render_report`：subject 为 None/数字归一为字符串；sources 中**非 dict 脏条目**
+  （字符串/数字/None）过滤后再渲染（`s.get()` 不再崩），返回新增
+  `dropped_non_dict`（被跳过数），`total_count` 保持按原始入参计数。
+- 单源 `apply_to_scoring` 异常 per-source 兜底为原 dict，不击穿整份报告。
+- `_render_jinja2` 异常降级链补全：Jinja2 渲染期错误（缺字段/类型不符）不再只捕
+  ImportError，改为 Jinja2 → `_render_simple` → `_render_fallback` 三级兜底；
+  六模板（default + 5 域）最小脏上下文全部不崩。
+
+### 边界审计遗留（已立案，本批不改，见 ROADMAP/审计报告）
+
+> ✅ **事后闭合注（2026-09-20，层 C 归档标注）**：下列 DEF-13/14/15/16 为 **v2.1.0 立案时点快照**，
+> 已在 **v2.1.1 全部修复/关闭**（修复见本文件 `[2.1.1]` 段，回归守护见 `tests/test_p2_v211.py` 四组 70 断言），
+> **勿再计为当前开放缺陷**。紧随其后的「Open 口径（保持现状）」三条是**刻意保留的设计口径**（仍生效），不在本次闭合范围。
+
+- **P2**：DEF-13 `detect_domain(None/123)` 崩；DEF-14 模板 autoescape 关闭的 XSS 面
+  （Jinja 表达式不执行，**无 SSTI**，仅在外部 Markdown→HTML 渲染时暴露）；
+  DEF-15 keyed/time 路有 50k 截断而 legacy `_extract_slots` 无截断（500k 多样长文本实测超时）；
+  DEF-16 中文领域词裸子串，"工业来回测试平台"因「来**回测**试」误判 finance
+  （P0-OPEN-05 的词边界只覆盖 ASCII 短缩写）。
+- **Open 口径（保持现状，已在审计报告固化解释）**：`score=1.0001` 原样透传不归一
+  （仅 0<s≤1 归一；经聚合层 `round(...,1)` 显示为 1.0）；负分 -0.5 无文本素材时保
+  v1_score 负值（❌噪声，非 empty）；精确季 vs年仅冲突实测 60（`coarse` 要求两侧皆粗粒度）。
+
+---
+
 ## [2.1.0-openfix] - 2026-09-18（P0-OPEN-04/06/05 + P1 缺口闭合，**版本号不变**）
 
 > 用户指令：审计缺口后自主执行，**版本号保持 2.1.0 不变**（本批为缺陷修复与口径对齐，

@@ -107,6 +107,40 @@ def _bootstrap_persons(subject: str) -> None:
         pass
 
 
+def _coerce_incoming_score(raw):
+    """P1(DEF-08/DEF-09)：入参 score 的类型保护 + 0-1 量纲归一化。
+
+    返回 (base_score, scale_normalized, score_invalid)。
+      - bool：标志位而非评分 → 按缺分 0 处理，不参与归一（DEF-08）。
+      - int/float（非 bool）：合法数值；NaN/Inf 显式归零，防 NaN 向下游传播；
+        0 < score <= 1 视作比例分 ×100（P0-OPEN-04），>1 / <0 / =0 原样保留
+        （1.0001 视为百分制满分附近，不强制钳制，原样透传——见 open 项口径）。
+      - 数值字符串：'72'→72、'0.72'→72（先转 float 再走同一归一判定）。
+      - None / 非数值字符串 / 其它类型：不击穿，归 0 并标记 score_invalid，
+        交由既有 semantic_fallback / empty 链按缺分处理（DEF-09）。
+    """
+    # bool 必须先于 int 判断（bool 是 int 子类）
+    if isinstance(raw, bool):
+        return 0, False, False  # 标志位而非评分 → 缺分 0，受控类型不算非法（DEF-08）
+    if raw is None:
+        return 0, False, False
+    val = raw
+    if isinstance(raw, str):
+        try:
+            val = float(raw.strip())
+        except (TypeError, ValueError, AttributeError):
+            return 0, False, True
+    if not isinstance(val, (int, float)):
+        return 0, False, True
+    val = float(val)
+    # NaN/Inf：非有限值不可作为评分，归零防传播
+    if val != val or val in (float('inf'), float('-inf')):
+        return 0, False, True
+    if 0 < val <= 1:
+        return round(val * 100, 2), True, False
+    return val, False, False
+
+
 def score_source(source: Dict, subject: str, with_domain: bool = True,
                  prefer_kb: bool = None, days_since_published: int = None,
                  domain_profile: dict = None) -> Dict:
@@ -164,18 +198,18 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
     两侧 KB 加分**数值同源**（均出自 `domain_router.kb_intersect_bonus`），仅字段归属不同。
     """
     # 0) base 三态入口（base_origin 可观测）
-    base_score = source.get('score', 0)
-    # P0-OPEN-04：量纲归一化。外部源/调用方可能传入 0-1 归一化分（如 0.72），
-    # 旧逻辑直接采用 → 0.72 被当 <40 噪声，且 ≤0 语义兜底条件也不触发（>0 假阳性），
-    # 致高分源被静默滤除。规则：0 < score <= 1 → 视作比例分 ×100；
-    # 精确 0 仍为 empty（真实无分），1 归一为 100（边界含入，避免满分源被丢弃）。
-    scale_normalized = False
-    try:
-        if isinstance(base_score, (int, float)) and 0 < float(base_score) <= 1:
-            base_score = round(float(base_score) * 100, 2)
-            scale_normalized = True
-    except (TypeError, ValueError):
-        pass
+    raw_score = source.get('score', 0)
+    # P0-OPEN-04 + P1(DEF-08/DEF-09)：入口类型保护 + 量纲归一化。
+    # ① 类型保护：旧实现仅 isinstance 数值，字符串脏分（'0.72'）穿透到
+    #    下方 `base_score <= 0` 比较直接抛 TypeError，打挂整条评分链（与禁空
+    #    骨架目标相悖）。现统一在入口把 score 强转为数值，非法类型不击穿。
+    # ② bool 排除（DEF-08）：bool 是 int 子类，True 会命中 (0,1] 被归一为 100；
+    #    但布尔更可能是标志位而非评分，故 bool 一律不参与归一、按缺分 0 处理。
+    # ③ 量纲归一（P0-OPEN-04）：数值型 0 < score <= 1 → 比例分 ×100；
+    #    精确 0 仍为 empty（真实无分），1 归一为 100（边界含入）。
+    # ④ NaN/Inf：float() 可解析但比较不命中，归一跳过；NaN 在下游比较恒 False，
+    #    归一化/empty 判定均不命中，此处显式归零防 NaN 向下游报告传播。
+    base_score, scale_normalized, score_invalid = _coerce_incoming_score(raw_score)
     base_origin = 'v1_score' if base_score else 'empty'
     xling_bridge_score = 0  # v1.9.0 GA10：跨语言桥接分（仅 semantic_fallback 路径产生）
 
@@ -297,6 +331,7 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
         'base_score': base_score,
         'base_origin': base_origin,
         'scale_normalized': scale_normalized,  # P0-OPEN-04：入参 0-1 量纲已 ×100
+        'score_invalid': score_invalid,        # P1(DEF-09)：入参脏分（非数值/NaN）标记
         'tier': tier,
         'trust_bonus': trust_bonus,
         'trust_bonus_base': trust_bonus_base,
@@ -679,6 +714,20 @@ def research(subject: str,
                 c2['severity'] = sc['severity']  # 用语义评覆盖中等/高严重度
                 c2['verdict'] = sc.get('verdict')       # P0-OPEN-06
                 c2['time_coverage'] = sc.get('time_coverage')
+                # v2.1.2（事件槽批次）：与异步路字段穿透对齐
+                c2['keyed_score'] = sc.get('keyed_score')
+                c2['conflict_slots'] = sc.get('conflict_slots')
+                c2['period_adjudication'] = sc.get('period_adjudication')
+                # v2.2.0：三元事件身份 + 多期间裁决 + LLM 时间抑制 字段全透传
+                for _fk in ('time_mode', 'event_count_a', 'event_count_b',
+                            'event_time_score', 'event_pairs',
+                            'event_disjoint_slots', 'event_overlap_slots',
+                            'event_slot_keys', 'period_pair_details',
+                            'period_disjoint_slots', 'period_overlap_slots',
+                            'llm_time_suppressed', 'llm_time_suppressed_slots',
+                            'scorer_mode'):
+                    if _fk in sc:
+                        c2[_fk] = sc.get(_fk)
                 verdict_counts[sc.get('verdict', 'not_assessable')] = \
                     verdict_counts.get(sc.get('verdict', 'not_assessable'), 0) + 1
                 time_cov_counts[sc.get('time_coverage', 'neither')] = \
@@ -855,6 +904,22 @@ async def async_research(subject: str,
                     c2 = dict(c)
                     c2['semantic_score'] = sc['score']
                     c2['severity'] = sc['severity']
+                    # v2.1.2（事件槽批次）：补齐与同步路 research 一致的字段穿透
+                    c2['verdict'] = sc.get('verdict')
+                    c2['time_coverage'] = sc.get('time_coverage')
+                    c2['keyed_score'] = sc.get('keyed_score')
+                    c2['conflict_slots'] = sc.get('conflict_slots')
+                    c2['period_adjudication'] = sc.get('period_adjudication')
+                    # v2.2.0：三元事件身份 + 多期间裁决 + LLM 时间抑制 字段全透传
+                    for _fk in ('time_mode', 'event_count_a', 'event_count_b',
+                                'event_time_score', 'event_pairs',
+                                'event_disjoint_slots', 'event_overlap_slots',
+                                'event_slot_keys', 'period_pair_details',
+                                'period_disjoint_slots', 'period_overlap_slots',
+                                'llm_time_suppressed', 'llm_time_suppressed_slots',
+                                'scorer_mode'):
+                        if _fk in sc:
+                            c2[_fk] = sc.get(_fk)
                     enriched.append(c2)
                 return {
                     'conflicts': enriched,
@@ -1114,6 +1179,22 @@ async def streaming_research(subject: str,
                     c2 = dict(c)
                     c2['semantic_score'] = sc['score']
                     c2['severity'] = sc['severity']
+                    # v2.1.2（事件槽批次）：补齐与同步路 research 一致的字段穿透
+                    c2['verdict'] = sc.get('verdict')
+                    c2['time_coverage'] = sc.get('time_coverage')
+                    c2['keyed_score'] = sc.get('keyed_score')
+                    c2['conflict_slots'] = sc.get('conflict_slots')
+                    c2['period_adjudication'] = sc.get('period_adjudication')
+                    # v2.2.0：三元事件身份 + 多期间裁决 + LLM 时间抑制 字段全透传
+                    for _fk in ('time_mode', 'event_count_a', 'event_count_b',
+                                'event_time_score', 'event_pairs',
+                                'event_disjoint_slots', 'event_overlap_slots',
+                                'event_slot_keys', 'period_pair_details',
+                                'period_disjoint_slots', 'period_overlap_slots',
+                                'llm_time_suppressed', 'llm_time_suppressed_slots',
+                                'scorer_mode'):
+                        if _fk in sc:
+                            c2[_fk] = sc.get(_fk)
                     enriched.append(c2)
                 return {
                     'conflicts': enriched,

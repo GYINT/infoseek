@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""account_forensics 工具处理器（v1.0.0 · FakeDetect 账号取证消费口）
+"""account_forensics 工具处理器（v2.2.0 · FakeDetect 账号取证消费口）
 
 与 identity_attribution 构成「发现→取证」双子工具：
   - identity_attribution : 已知用户名 → 发现跨平台账号（轻量人因验证）
@@ -12,10 +12,14 @@
   - 注册表 FakeDetect 经 enabled ∩ consent 判定
 
 输入:  {dataset: {meta:[{id,followers,following,posts,er,...}], likes:{id:[...]},
-                  growth:{id:[...]}, edges:[[a,b]], groups?} | 文件路径,
+                  growth:{id:[...]}, edges:[[a,b]], groups?,
+                  profile?: {id:{...}} 或 [{id,...}],   # HF-R1 账号画像字段
+                  timing?: {id:[24 维活跃直方图]}}      # HF-R1 活跃时段（供 L1 时段熵）
+        | 文件路径,
         target_accounts?: [id,...], consent: bool}
 输出:  {status, verdicts, coord_clusters, sync_groups, summary(四层命中),
-        degradation, blindspots, sufficiency, meta}
+        degradation, blindspots, sufficiency, meta,
+        profile_applied, timing_applied}   # HF-R1 追加字段（向后兼容）
 """
 import os
 import sys
@@ -59,6 +63,41 @@ def _is_enabled() -> Dict:
         return False, "注册表查询失败（FakeDetect 授权状态不可判定）"
 
 
+def _norm_profile(profile) -> Dict:
+    """HF-R1: profile -> {id_str: {字段}}（dict 或 list[dict] 皆可）；空/非法 -> {}。"""
+    out = {}
+    if isinstance(profile, dict):
+        for k, v in profile.items():
+            if isinstance(v, dict):
+                out[str(k)] = v
+    elif isinstance(profile, list):
+        for item in profile:
+            if isinstance(item, dict) and item.get("id") is not None:
+                out[str(item["id"])] = {k: v for k, v in item.items() if k != "id"}
+    return out
+
+
+def _merge_profile(meta_rows, profile):
+    """HF-R1: 把 profile 字段并入 meta 每行（meta 既有键优先，不覆盖）；profile 空时原样返回。
+
+    向后兼容：profile 为 None/空 或 meta_rows 非 list 时，原样返回 meta_rows。
+    """
+    if not isinstance(meta_rows, list):
+        return meta_rows
+    prof = _norm_profile(profile)
+    if not prof:
+        return meta_rows
+    merged = []
+    for row in meta_rows:
+        r = dict(row) if isinstance(row, dict) else row
+        if isinstance(r, dict):
+            extra = prof.get(str(r.get("id")))
+            if extra:
+                r = {**extra, **r}          # meta 原有键优先于 profile
+        merged.append(r)
+    return merged
+
+
 def tool_account_forensics(args: Dict) -> Dict:
     """account_forensics 工具实现：dataset → 深度取证 Report。"""
     args = args or {}
@@ -97,14 +136,17 @@ def tool_account_forensics(args: Dict) -> Dict:
         if isinstance(dataset, str):
             ds = load_dataset(source=dataset)
         elif isinstance(dataset, dict) and dataset.get("meta") is not None:
-            ds = from_raw(meta_df=pd.DataFrame(dataset["meta"]),
+            meta_rows = _merge_profile(dataset["meta"], dataset.get("profile"))
+            ds = from_raw(meta_df=pd.DataFrame(meta_rows),
                           likes=dataset.get("likes"), growth=dataset.get("growth"),
-                          edges=dataset.get("edges"), groups=dataset.get("groups"))
+                          edges=dataset.get("edges"), groups=dataset.get("groups"),
+                          profile=dataset.get("profile"), timing=dataset.get("timing"))
         elif isinstance(dataset, dict) and dataset.get("source"):
             ds = load_dataset(source=dataset["source"])
         else:
             return {"status": "failed",
-                    "reason": "dataset 格式不支持：需 {meta:[...], likes?, growth?, edges?} 或文件路径",
+                    "reason": "dataset 格式不支持：需 {meta:[...], likes?, growth?, edges?,"
+                              " profile?, timing?} 或文件路径",
                     "degradation": "invalid_input"}
     except Exception as e:
         return {"status": "failed", "reason": f"数据接入失败: {e}", "degradation": "invalid_input"}
@@ -129,4 +171,7 @@ def tool_account_forensics(args: Dict) -> Dict:
         "blindspots": rep.get("blindspots", []),
         "meta": rep.get("meta", {}),
         "quality": rep.get("quality", ""),
+        # HF-R1 追加字段（向后兼容：无 profile/timing 时均为 0）
+        "profile_applied": len(_norm_profile(dataset.get("profile"))) if isinstance(dataset, dict) else 0,
+        "timing_applied": len(dataset.get("timing") or {}) if isinstance(dataset, dict) else 0,
     }

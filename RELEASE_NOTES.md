@@ -1,3 +1,77 @@
+# Infoseek v2.2.0 发布说明
+
+> 发布日期：2026-09-19 ｜ 版本：**2.2.0**（GA11 事件槽批次阶段 1-3：三元事件身份 + 跨文本时间槽键 + LLM 路径收口）｜ 许可证：MIT
+> 前置：v2.1.2（F-06 事件抽取 + F-04 期间裁决 + F-07 time 路主体闸）。MINOR 定级：跨文本事件身份从
+> 二元 `(subject, aspect)` 升级为三元 `(subject, aspect, time_key)`，跨 2 核心模块 + LLM 全路径字段收口。
+
+## v2.2.0 核心改动
+
+**主题**：把「时间」从对齐后的裁决维度，升级为**事件身份的一等组成**，并根治 LLM 成功路径的字段截断。
+
+- **阶段 1 · 事件身份规范化**：事件 schema 增 `time_key`（`{start,end,label}`，半开 `[start,end)`）；
+  单句多时间 span 时事件**扇出**（不再只取 `spans[0]`）；跨文本签名升级三元 `(subject, aspect, time_key)`。
+  三类键严格分离（事件身份 ／ 单侧去重 `(subject,aspect,value,polarity,time_label)` ／ 时间关系用真实 span）。
+- **阶段 2 · 跨文本时间槽键**：`_event_time_score` 三元对拍，不同 time_key 的同主体同方面事件按真实
+  半开区间对拍，任一 overlap → conflict、全 disjoint 按 label 给 60/35；端点相接视为 disjoint；
+  透出 `event_disjoint_slots`/`event_overlap_slots`/`event_pairs` 与多期间逐对 `period_pair_details`。
+- **阶段 3 · LLM 与调用路径收口**：B 层 LLM 槽表增时间维度（`_llm_slot_span`/`_llm_slot_conflicts`，
+  真实 span 可解析且 disjoint → suppression）；**同步 `score_with_llm` 成功分支原窄白名单截断全部事件/期间/
+  keyed 字段，改为完整 A 层 `dict(local)` 为底**；同步/异步/hybrid/batch/`infoseek_core_v2`/MCP wrapper
+  统一字段透传，纯 A 层默认补 `llm_time_suppressed*=[]`。
+
+**兼容性**：返回体为超集（新增字段，老字段语义不动）；二元 `event_sig` 内部保留，三元对齐为新增事件层逻辑。
+B 层 LLM 仍默认关闭（`INFOSEEK_CONTRADICTION_LLM=1` 启用）。默认不推送 GitHub。
+
+**验证**：`test_event_slots_v220.py` 54 断言 + 新增 `test_llm_fields_v220.py` 26 断言（五出口 A 层 31 字段
+完整超集契约，防窄白名单回归；固化 R4：router 返 None 不再被伪装成异常降级）；版本单源守护 22 断言；
+全量回归 `python tests/run_tests.py` **67 PASS / 0 SKIP / 0 FAIL（231s）ALL GREEN**。
+
+---
+
+# Infoseek v2.1.2 发布说明
+
+> 发布日期：2026-09-19 ｜ 版本：**2.1.2**（GA11 事件槽批次：事件抽取 + 期间裁决 + time 路主体闸）｜ 许可证：MIT
+> 前置：v2.1.1（边界审计 P2 四项硬化；同日另有不 bump 的 P3 阶段0 主体贯通 openfix）。
+
+## v2.1.2 核心改动
+
+**主题**：把矛盾检测从「短语级信号」推进到「**结构化事件级对齐**」——GA11 事件槽重构的阶段 1-3。
+
+- **F-06 事件抽取**（`_split_clauses` / `_extract_events`）：标点分句 → 逐事件
+  `{subject, aspect, value, polarity, time_span, event_sig}`；数值/方面**句内独立归属**，
+  修「全文单次扫描」导致的多事实句串味。事件在**原始正文**上抽取并随 claim 穿透
+  （跨越 `text[:500]` / `text[:300]` 两级截断）。
+- **F-04 期间裁决**（`_period_adjudicate`）：同主体同方面且双方期间均已知且不相交 → 判为非冲突，
+  落地为**降权（×0.5，只降权、不滤除、不归零）**；期间相同/相交/缺失 → 走现值冲突规则；
+  空主体不裁决（保持旧契约）。
+- **F-07 time 路主体闸**（`time_slot_score`）：签名向后兼容地扩展主体参数与事件参数；
+  同主体 → 事件级对齐，跨主体 → 不可对拍，**消除跨主体时间误报**。
+- **research 链路字段穿透对齐**：单条冲突补齐 `verdict/time_coverage/keyed_score/conflict_slots/period_adjudication`。
+
+**兼容性**：所有既有公开调用（2 参 `time_slot_score`、不带 `events` 的 `score_contradiction`）
+行为不变；返回体为**超集**（新增字段，老字段语义不动）。B 层 LLM 槽维持默认关闭。
+
+**验证**：新增 `tests/test_event_slots_v220.py`（47 断言 / 5 组）；全量回归
+**65 PASS / 2 SKIP / 0 FAIL / 0 TIMEOUT**（67 套件，2 SKIP = jieba/pypinyin 可选依赖缺失）。
+
+---
+
+# Infoseek v2.1.1 发布说明
+
+> 发布日期：2026-09-18 ｜ 版本：**2.1.1**（边界审计 P2 四项硬化）｜ 许可证：MIT
+> 前置：v2.1.0（OSINT 身份归因 P0 契约修复 + 双源聚合 + 授权 UX；同日另有不 bump 的 P1 openfix）。
+> PATCH 定级：4 项均为边界/安全缺陷硬化，无对外工具契约破坏性变更；但横跨 4 模块 + 词表 schema
+> 扩展（strict_keywords/false_compounds）+ 新增清洗管线，按 Xes 版本规则（改动幅度 >30%）递增 PATCH 位。
+
+## 本版要点
+- **DEF-13** `detect_domain` 入参类型守卫（None/数字不再 AttributeError）。
+- **DEF-15** legacy 短语袋路统一 50k 有界窗口，500k 长文本从 >150s 超时降到 <0.2s，三路窗口一致。
+- **DEF-14** 报告输出层注入清洗（危险标签/on*=/危险协议，无 SSTI）+ CSV 公式注入防护（正常 markdown/数值零误伤）。
+- **DEF-16** 中文 2 字歧义词「回测」误嵌守卫（strict_keywords + false_compounds 区间覆盖判定），yaml/内置双源同步。
+- 新增守护 `tests/test_p2_v211.py`（70 断言）；P1 守护 41 断言与全量既有套件零回归。
+
+---
+
 # Infoseek v2.1.0 发布说明
 
 > 发布日期：2026-09-18 ｜ 版本：**2.1.0**（OSINT 身份归因 P0 契约修复 + 双源聚合 + 授权 UX）｜ 许可证：MIT

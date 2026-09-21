@@ -135,12 +135,16 @@ def assess_sufficiency(ds, thresholds: dict | None = None) -> dict:
 
 def _run_l1(ds, thresholds: dict) -> dict:
     """L1 统计规则：红旗数/单规则命中/聚合判定（互惠率前移开，图缺失自动降级）"""
-    feats = l1_engine.compute_l1_features(ds.meta_df, ds.likes, ds.growth, ds.G)
+    feats = l1_engine.compute_l1_features(ds.meta_df, ds.likes, ds.growth, ds.G,
+                                          timing=getattr(ds, "timing", None))
     res = l1_engine.apply_l1_rules(feats, thresholds=thresholds or None)
     n_flags = res["n_flags"]
     flags = {
         "benford": res["benford"], "er": res["er"], "growth": res["growth"],
         "fr": res["fr"], "recip": res["recip"],
+        # HF-R1 新增规则（默认关闭；命中永远为 False，仅结构完整）
+        "hour_entropy": res["hour_entropy"], "rhythm": res["rhythm"],
+        "tpl": res["tpl"], "follower_quality": res["follower_quality"],
     }
     return {"feats": feats, "n_flags": n_flags, "pred": res["pred"], "flags": flags}
 
@@ -294,7 +298,8 @@ def detect(dataset, thresholds: dict | None = None, require_sufficient: bool = T
             if isinstance(ds, dict) and ds.get("meta") is not None:
                 ds = from_raw(meta_df=pd.DataFrame(ds.get("meta", [])),
                               likes=ds.get("likes"), growth=ds.get("growth"),
-                              edges=ds.get("edges"), groups=ds.get("groups"))
+                              edges=ds.get("edges"), groups=ds.get("groups"),
+                              profile=ds.get("profile"), timing=ds.get("timing"))
             else:
                 ds = load_dataset(source=ds if isinstance(ds, str) else None)
         except Exception as e:
@@ -419,7 +424,8 @@ def detect(dataset, thresholds: dict | None = None, require_sufficient: bool = T
 def _meta() -> dict:
     return {"engine": "fake_detect", "version": ENGINE_VERSION,
             "routed_infoseek": ROUTED_INFOSEEK,
-            "changelog": "v1.0.0 函数化（run_detect.py -> detect(dataset)->Report）；P1.5 时序同步内置"}
+            "changelog": "v1.0.0 函数化（run_detect.py -> detect(dataset)->Report）；P1.5 时序同步内置；"
+                         "HF-R1 增列 hour_entropy / rhythm_cv / tpl_ngram / follower_quality（L1 规则默认关闭）"}
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-scripts/account_trust_scorer.py — 账号人因验证器（v1.0.0 · P0b）
+scripts/account_trust_scorer.py — 账号人因验证器（v1.1.0 · P0b / HF-R1）
 
 对社交账号做「真人验证」评分：区分 真人 / 机器人 / 水军 / 可疑账号。
-纯规则启发式（零外部依赖、零网络、零成本），信号维度：
+纯规则启发式（零外部依赖、零网络、零成本），信号维度（HF-R1：四维 → 五维）：
 
-  ① 账号成熟度  (25%)  账号年龄 + 发帖总量合理性（新号刷量/幽灵号暴露）
-  ② 粉丝真实性  (25%)  粉丝/关注比 + 僵尸粉比例 + 互动率（水军互关/僵尸粉暴露）
-  ③ 行为自然度  (25%)  发帖间隔规律性 + 活跃时段分布 + 回复速率（机器人定时/秒回暴露）
-  ④ 内容一致性  (25%)  话题多样性 + 跨平台内容重叠（单一话题机器 / 多平台同文暴露）
+  ① 账号成熟度    (20%)  账号年龄 + 发帖总量合理性（新号刷量/幽灵号暴露）
+  ② 粉丝真实性    (20%)  粉丝/关注比 + 僵尸粉比例 + 互动率（水军互关/僵尸粉暴露）
+  ③ 行为自然度    (20%)  发帖间隔规律性 + 活跃时段分布 + 回复速率（机器人定时/秒回暴露）
+  ④ 内容一致性    (20%)  话题多样性 + 跨平台内容重叠（单一话题机器 / 多平台同文暴露）
+  ⑤ 内容伪造特征  (20%)  模板化相似度 + AI 生成占比 + 重复内容率（HF-P0 新增；
+                          属「账号公域内容属性」，非设备/客户端指纹，不涉红线）
+
+HF-P0 判据：仅扩展字段 + 规则，不新增能力项、不改 network_boundary、不动默认开关；
+本模块输出契约向后兼容（dimensions 多一个键，confidence 分母随维度数自适应）。
 
 设计对齐 infoseek 架构：
   - 输入容错：字段可选，缺省信号按「信息不足」处理，不误判
@@ -31,12 +36,13 @@ import json
 import sys
 from typing import Dict, List, Optional
 
-# ── 维度权重 ──
+# ── 维度权重（HF-R1：四维 → 五维，各 0.20，权重和 = 1.0）──
 DIM_WEIGHTS = {
-    "maturity": 0.25,     # 账号成熟度
-    "audience": 0.25,     # 粉丝真实性
-    "behavior": 0.25,     # 行为自然度
-    "content": 0.25,      # 内容一致性
+    "maturity": 0.20,     # 账号成熟度
+    "audience": 0.20,     # 粉丝真实性
+    "behavior": 0.20,     # 行为自然度
+    "content": 0.20,      # 内容一致性
+    "forge": 0.20,        # 内容伪造特征（HF-P0 新增）
 }
 
 # ── 判定阈值 ──
@@ -226,6 +232,55 @@ def _score_content(a: Dict) -> tuple:
     return _clamp(score / max(weight_sum, 0.01)), flags
 
 
+def _score_forge(a: Dict) -> tuple:
+    """⑤ 内容伪造特征（HF-P0 新增）：模板化相似度 + AI 生成占比 + 重复内容率。
+
+    仅消费「账号公域内容属性」字段（非设备/客户端指纹，不触红线）：
+      - template_similarity : 帖文 n-gram 模板化相似度 0-1（高 = 批量套模板）
+      - ai_generated_ratio  : 判定为 AI 生成文本的占比 0-1
+      - duplicate_ratio     : 跨帖/跨账号重复内容占比 0-1
+    缺省信号按「信息不足」中性处理，不误判。
+    """
+    flags: List[str] = []
+    tpl = a.get("template_similarity")
+    ai = a.get("ai_generated_ratio")
+    dup = a.get("duplicate_ratio")
+    if tpl is None and ai is None and dup is None:
+        return 50.0, ["缺内容伪造信号"]
+    score, weight_sum = 0.0, 0.0
+    if tpl is not None:
+        if tpl > 0.8:
+            s = 15
+            flags.append("高度模板化内容(疑似伪造)")
+        elif tpl > 0.5:
+            s = 50
+        else:
+            s = 100
+        score += s * 0.4
+        weight_sum += 0.4
+    if ai is not None:
+        if ai > 0.7:
+            s = 20
+            flags.append("AI生成内容占比高(疑似伪造)")
+        elif ai > 0.4:
+            s = 55
+        else:
+            s = 100
+        score += s * 0.35
+        weight_sum += 0.35
+    if dup is not None:
+        if dup > 0.6:
+            s = 20
+            flags.append("重复内容占比高(疑似搬运)")
+        elif dup > 0.3:
+            s = 55
+        else:
+            s = 100
+        score += s * 0.25
+        weight_sum += 0.25
+    return _clamp(score / max(weight_sum, 0.01)), flags
+
+
 # ═══════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════
@@ -250,7 +305,8 @@ def score_account(account: Dict) -> Dict:
     参数: account 含以下可选字段（缺省信号按中性处理）：
         username, account_age_days, post_count, post_interval_std,
         active_hours, reply_rate, followers, following, zombie_follower_ratio,
-        engagement_rate, topic_diversity, cross_platform_overlap, cross_platform_matches
+        engagement_rate, topic_diversity, cross_platform_overlap, cross_platform_matches,
+        template_similarity, ai_generated_ratio, duplicate_ratio   # HF-R1 内容伪造特征
 
     返回: {
         username, trust_score, verdict, verdict_cn, confidence,
@@ -267,6 +323,7 @@ def score_account(account: Dict) -> Dict:
         "audience": (_score_audience, ["followers", "following", "zombie_follower_ratio", "engagement_rate"]),
         "behavior": (_score_behavior, ["post_interval_std", "active_hours", "reply_rate"]),
         "content": (_score_content, ["topic_diversity", "cross_platform_overlap", "cross_platform_matches"]),
+        "forge": (_score_forge, ["template_similarity", "ai_generated_ratio", "duplicate_ratio"]),
     }
     total, weight_sum = 0.0, 0.0
     for name, (fn, sig_fields) in scorers.items():
@@ -290,6 +347,7 @@ def score_account(account: Dict) -> Dict:
     _STRONG_BOT_FLAGS = (
         "发帖间隔极规律(疑似定时)", "活跃时段过窄(疑似脚本)", "回复速率异常高(疑似自动)",
         "话题极度单一(疑似主题机器人)", "跨平台同文多发(疑似矩阵号)", "僵尸粉高占比",
+        "高度模板化内容(疑似伪造)", "AI生成内容占比高(疑似伪造)", "重复内容占比高(疑似搬运)",
     )
     strong_hits = sum(1 for f in all_flags if f.startswith(_STRONG_BOT_FLAGS))
     if strong_hits >= 3 and verdict in ("real", "likely_real"):
@@ -297,8 +355,8 @@ def score_account(account: Dict) -> Dict:
     elif strong_hits >= 4 and verdict in ("suspicious", "likely_real"):
         verdict = "bot"
 
-    # 置信度：有信号的维度占比
-    confidence = round(1.0 - len(missing) / 4.0, 2)
+    # 置信度：有信号的维度占比（分母随维度数自适应，HF-R1 四维→五维）
+    confidence = round(1.0 - len(missing) / len(scorers), 2)
 
     return {
         "username": account.get("username", ""),
@@ -318,17 +376,23 @@ def _demo() -> int:
                       "post_interval_std": 3.5, "active_hours": 14, "reply_rate": 1.2,
                       "followers": 5000, "following": 300, "zombie_follower_ratio": 0.05,
                       "engagement_rate": 0.03, "topic_diversity": 0.7,
-                      "cross_platform_overlap": 0.1, "cross_platform_matches": 3}),
+                      "cross_platform_overlap": 0.1, "cross_platform_matches": 3,
+                      "template_similarity": 0.15, "ai_generated_ratio": 0.1,
+                      "duplicate_ratio": 0.1}),
         ("定时机器人", {"username": "bot1", "account_age_days": 400, "post_count": 4000,
                         "post_interval_std": 0.05, "active_hours": 1, "reply_rate": 0,
                         "followers": 50, "following": 5000, "zombie_follower_ratio": 0.8,
                         "engagement_rate": 0.0001, "topic_diversity": 0.02,
-                        "cross_platform_overlap": 0.95, "cross_platform_matches": 0}),
+                        "cross_platform_overlap": 0.95, "cross_platform_matches": 0,
+                        "template_similarity": 0.9, "ai_generated_ratio": 0.85,
+                        "duplicate_ratio": 0.7}),
         ("矩阵水军", {"username": "mob", "account_age_days": 15, "post_count": 3000,
                       "post_interval_std": 0.1, "active_hours": 2, "reply_rate": 80,
                       "followers": 10, "following": 200, "zombie_follower_ratio": 0.9,
                       "engagement_rate": 0.0002, "topic_diversity": 0.05,
-                      "cross_platform_overlap": 0.9, "cross_platform_matches": 1}),
+                      "cross_platform_overlap": 0.9, "cross_platform_matches": 1,
+                      "template_similarity": 0.85, "ai_generated_ratio": 0.6,
+                      "duplicate_ratio": 0.65}),
         ("信息不足", {"username": "ghost"}),
     ]
     for name, acc in cases:

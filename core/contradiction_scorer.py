@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-core/contradiction_scorer.py — Infoseek 语义矛盾评分（v2.4.0 MINOR 新增）
+core/contradiction_scorer.py — Infoseek 语义矛盾评分（mod-v2.5.0；v2.4.0 MINOR 引入，v2.5.0 叙述句事实槽召回增强）
 
 V2.3.0/v2.3.1 的冲突检测仅判 "同实体 ≥2 异源" 就报，severity 写死 medium，
 对真实「自相矛盾 / 客观一致 / 并非冲突」三者区分力差。
@@ -72,6 +72,18 @@ PRED_TEMPLATES_EN = [
 # 事实槽提取
 # ═══════════════════════════════════════════════════════════
 
+# DEF-15（v2.1.1 P2）：legacy 短语袋路有界预算。三路窗口统一——
+# keyed 路 _build_keyed_slots（L394）与 time 路 _parse_time_spans（L553）
+# 早已截断到 _KEYED_MAX_CHARS(50k)，唯独 legacy _extract_slots / _detect_negation
+# 对全文线性展开 2-gram，500k 长文本实测 timeout(>150s)。此处复用同一窗口常量，
+# 保持三路一致；legacy 只取弱信号 2-gram，截断仅损失 50k 之后近零贡献（长文本本就稀释）。
+def _slot_window(text) -> str:
+    """legacy 路统一文本窗口：非字符串归一 + 截断到有界预算。"""
+    if not isinstance(text, str):
+        text = '' if text is None else str(text)
+    return text[:_KEYED_MAX_CHARS]
+
+
 def _extract_slots(text: str) -> Set[str]:
     """从文本抽取事实槽（标准化字符串集合）。
 
@@ -79,7 +91,7 @@ def _extract_slots(text: str) -> Set[str]:
     v2.4.1 PATCH (DEF-D): 模板/正则抛错时降级返回空集，reasons 留痕。
     """
     slots = set()
-    t = text.strip()
+    t = _slot_window(text).strip()  # DEF-15：截断到 50k 有界窗口，防长文本 2-gram 超线性
     if not t:
         return slots
     try:
@@ -180,6 +192,8 @@ def _cn_number(token: str) -> Optional[float]:
 NUMERIC_ASPECTS = {
     'revenue', 'profit', 'market_share', 'valuation', 'headcount',
     'founded_year', 'funding', 'pricing', 'product_spec', 'trend_dir',
+    # v2.5.0 扩充：销量/机构评级（目标价）亦可承载数值冲突
+    'sales_volume', 'analyst_rating',
 }
 # 数字 → 方面的就近距离（字符）：指标名词后侧窄窗（指标常在前、数值在后），
 # 趋势词前窗为主（增长 12%），二者均收紧以避免跨指标串味
@@ -337,9 +351,15 @@ def _assign_numbers(text_low: str, membership: dict):
 
 
 def _subject_key(claim: Dict, text: str) -> str:
-    """主体键：契约优先（claim.entity / claim.subject），缺省全局键 ''。"""
+    """主体键：契约优先（claim.entity / claim.subject / claim.entity_name），缺省全局键 ''。
+
+    阶段0 主体贯通（openfix）：读取字段扩至 entity_name —— conflict_v3 产出的
+    claim 用的是 entity_name 键（NER 口径），此前只读 entity/subject 导致生产
+    链路主体键恒为空、keyed 路跨主体隔离失效。优先级 entity > subject >
+    entity_name（显式契约字段优先，NER 字段兜底）。
+    """
     if isinstance(claim, dict):
-        for f in ('entity', 'subject'):
+        for f in ('entity', 'subject', 'entity_name'):
             v = claim.get(f)
             if v and str(v).strip():
                 return re.sub(r'\s+', '', str(v).strip().lower())
@@ -385,11 +405,61 @@ _KEYED_MAX_ASPECT_HITS = 500
 _KEYED_MAX_VALUES = 200
 
 
+# ──────────────────────────────────────────────────────────────
+# 词位值（term-value）抽取：无 opposites 登记方面的「同槽值不同」检测
+# 缺口（P2-4/D-4）：`_enum_conflict` 仅覆盖 opposites 预定义词对，
+# location（深圳↔北京）、person_change（赵远航↔孙启铭）、analyst_rating
+# （增持↔中性）这类同槽不同值此前完全漏检。此处取「方面关键词后侧紧邻
+# 词位」作槽值：值相同→不冲突；两侧存在互异值→计一次 term 冲突。
+# ──────────────────────────────────────────────────────────────
+_TERM_VALUE_ASPECTS = {'location', 'person_change', 'analyst_rating', 'listing_status'}
+# 值词位形态：连续中文串，或以字母起首的拉丁串
+_VALUE_RUN_PAT = re.compile(r"[\u4e00-\u9fff]{1,}|[a-z][a-z0-9\-]{0,}")
+# 前置填充词（长优先，防「达」先剥「达到」）
+_TERM_FILLERS = (
+    "总部位于", "总部设于", "坐落于", "位于", "地处", "设于", "设在",
+    "达到", "高达", "超过", "约为", "现任", "担任", "出任",
+    "达", "逾", "约", "近", "系", "为", "是", "在",
+)
+# 尾部动作词（值词位后缀剥离：赵远航辞去职务 → 赵远航）
+_TERM_TAIL_FILLERS = ("辞去职务", "辞去", "辞职", "卸任", "离职", "职务", "职位", "一职")
+_TERM_VALUE_WINDOW = 24       # 关键词后侧扫描窗（字符）
+_TERM_VALUE_MAX_CHARS = 12    # 值词位最长字符数（防长句误吞）
+_TERM_VALUE_MIN_CHARS = 2     # 值词位最短字符数（单字噪声多，弃）
+
+
+def _term_value(text_low: str, term: str, syn: dict) -> str:
+    """取方面关键词后侧紧邻的枚举值词位（跳过空白/标点/填充词/停用词）。"""
+    stop = set(syn.get("subject_stopwords", {}).get("zh", []))
+    stop |= set(syn.get("subject_stopwords", {}).get("en", []))
+    start = 0
+    while True:
+        idx = text_low.find(term, start)
+        if idx < 0:
+            return ""
+        seg = text_low[idx + len(term): idx + len(term) + _TERM_VALUE_WINDOW]
+        for m in _VALUE_RUN_PAT.finditer(seg):
+            run = m.group(0)
+            for f in _TERM_FILLERS:          # 剥离前置填充词
+                while run.startswith(f):
+                    run = run[len(f):]
+            for f in _TERM_TAIL_FILLERS:      # 剥离尾部动作词
+                while run.endswith(f) and len(run) > len(f):
+                    run = run[:-len(f)]
+            if not run or run in stop or run in _TERM_FILLERS:
+                continue
+            if len(run) < _TERM_VALUE_MIN_CHARS:
+                continue
+            return run[:_TERM_VALUE_MAX_CHARS]
+        start = idx + 1
+
+
 def _build_keyed_slots(claim: Dict, text: str, syn: dict) -> dict:
     """单条 claim → 键控槽表 {aspect: {"values":[...], "terms":[...], "negated"}}。
 
     数值归属走全文单次扫描 + 就近唯一归属（不跨方面串味）；
-    非数值型方面仅承载枚举词与否定极性。
+    非数值型方面承载枚举词、否定极性，并对 location/person_change/
+    analyst_rating 作词位值抽取（v2.5.0/P2-4-D-4）。
     """
     t_low = text.lower()[:_KEYED_MAX_CHARS]  # 长文本保护：截断防超线性
     subj = _subject_key(claim, text)
@@ -402,11 +472,19 @@ def _build_keyed_slots(claim: Dict, text: str, syn: dict) -> dict:
     slots: Dict[str, dict] = {}
     for asp, terms in membership.items():
         neg_any = any(_negated(t_low, kw, syn) for kw in terms)
+        term_values: list = []
+        if asp in _TERM_VALUE_ASPECTS:
+            for kw in terms:
+                val = _term_value(t_low, kw, syn)
+                if val and val not in term_values:
+                    term_values.append(val)
+            term_values = term_values[:_KEYED_MAX_VALUES]
         slots[asp] = {
             "subject": subj,
             "values": numeric.get(asp, [])[:_KEYED_MAX_VALUES],
             "terms": terms[:4],
             "enum_terms": terms,
+            "term_values": term_values,
             "negated": neg_any,
             "polarity": None,
         }
@@ -420,6 +498,7 @@ def _value_conflicts(asp: str, va: dict, vb: dict):
     """
     nums_a = [v for v in va.get("values", []) if v["kind"] == "number"]
     nums_b = [v for v in vb.get("values", []) if v["kind"] == "number"]
+    num_hit = False
     for x in nums_a:
         for y in nums_b:
             if x["percent"] != y["percent"]:
@@ -427,6 +506,7 @@ def _value_conflicts(asp: str, va: dict, vb: dict):
             xv, yv = x["value"], y["value"]
             if asp == 'founded_year':
                 if abs(xv - yv) >= 1:
+                    num_hit = True
                     yield ("num", round(min(xv, yv), 4), round(max(xv, yv), 4),
                            x["percent"]), f"成立年份冲突 {xv:g}↔{yv:g}"
                 continue
@@ -434,8 +514,17 @@ def _value_conflicts(asp: str, va: dict, vb: dict):
             rel = abs(xv - yv) / base
             if (x["percent"] and abs(xv - yv) >= 3 and rel >= 0.15) or \
                (not x["percent"] and rel >= 0.15):
+                num_hit = True
                 yield ("num", round(min(xv, yv), 4), round(max(xv, yv), 4),
                        x["percent"]), f"数值冲突 {xv:g}↔{yv:g}"
+    # 词位值冲突（v2.5.0/P2-4-D-4）：非数值型方面的「同槽值不同」
+    # （location 深圳↔北京、person_change 赵远航↔孙启铭）。仅在同槽无数值
+    # 冲突时启用，避免同一方面重复计分。
+    if not num_hit:
+        only_a = sorted(set(va.get("term_values") or []) - set(vb.get("term_values") or []))
+        only_b = sorted(set(vb.get("term_values") or []) - set(va.get("term_values") or []))
+        if only_a and only_b:
+            yield ("term", asp), f"词位值冲突 {only_a[0]}↔{only_b[0]}"
     # 否定极性冲突（同一方面，一肯定一否定），且非双否定
     if va.get("negated") != vb.get("negated") and (va.get("negated") or vb.get("negated")):
         yield ("pol", asp), "极性冲突（肯/否对立）"
@@ -612,17 +701,366 @@ def _spans_overlap(sa: Dict, sb: Dict) -> bool:
     return sa['start'] < sb['end'] and sb['start'] < sa['end']
 
 
-def time_slot_score(text_a: str, text_b: str) -> Dict:
-    """P0-OPEN-06：时间事实槽比对。
+# ═══════════════════════════════════════════════════════════
+# v2.1.2 事件槽批次（F-06 事件抽取 / F-04 期间裁决 / F-07 time 路主体闸）
+#   F-06：标点分句 → 逐事件 {subject,aspect,value,polarity,time_span,event_sig}
+#         （修「全文单次扫描数值归属」局限——多事实句各自独立归属，不跨句串味）
+#   F-04：同主体同方面且双方期间均已知且不相交 → 降权（×0.5，不滤除、不归零）
+#   F-07：time 路主体闸——同主体 → 事件级对齐；跨主体 → 不可对拍（消除跨主体时间误报）
+# ═══════════════════════════════════════════════════════════
 
-    返回 {score, conflict, time_slots_a, time_slots_b, reasons, coverage}。
-      coverage:
-        'both_timed' 两条都抽到时间（已评估，可对拍）
-        'partial'    仅一条有时间（无法对拍 → 未评估）
-        'neither'    两条都无时间（未评估）
-      conflict=True 仅当双方都有时间且区间两两不相交（同一主体时间矛盾）。
-    冲突分：精确粒度（季/月）60（high 边界）；仅全年粗粒度 35（medium，容忍跨年口径）。
+_EVENT_MAX_CHARS = 5_000     # 事件抽取窗口（事件主要在前段；与三路有界预算同构）
+_EVENT_MAX_CLAUSES = 24      # 分句上限（防长文句数爆炸）
+_EVENT_MAX_EVENTS = 40       # 事件数上限
+_PERIOD_DISJOINT_DAMP = 0.5  # F-04 期间不相交降权系数（只降权，不滤除；最低保留 1）
+
+# 标点分句：中英句末/分句标点 + 换行（英文句号须后接空白才算边界，避免小数点误切）
+_CLAUSE_SPLIT_RE = re.compile(r'[。！？；;!?\n\r]+|(?<=\.)\s+')
+
+
+def _split_clauses(text) -> List[str]:
+    """F-06：按标点分句（零依赖）。非字符串归一（None→''，其余→str()），空句剔除，句数有界。"""
+    if not isinstance(text, str):
+        text = '' if text is None else str(text)
+    if not text:
+        return []
+    t = text[:_EVENT_MAX_CHARS]
+    parts = [p.strip() for p in _CLAUSE_SPLIT_RE.split(t)]
+    return [p for p in parts if p][:_EVENT_MAX_CLAUSES]
+
+
+def _stable_time_key(ts) -> str:
+    """v2.2.0：时间区间稳定键（纳入完整 [start,end) 半开区间 + label）。
+
+    同 start、不同 end 的区间必须得到不同键（修旧「仅取 spans[0]」时代
+    无从区分的隐患）。ts 非 dict / 全空 → 'na'（无时间事件的稳定键）。
     """
+    if not isinstance(ts, dict):
+        return 'na'
+    start = str(ts.get('start') or '').strip()
+    end = str(ts.get('end') or '').strip()
+    label = str(ts.get('label') or '').strip()
+    if not start and not end and not label:
+        return 'na'
+    return f'{start or "?"}~{end or "?"}|{label}'
+
+
+def _event_identity(subject: str, aspect: str, time_key: str) -> str:
+    """v2.2.0：跨文本事件身份（三元签名 subject|aspect|time_key）。
+
+    取代旧二元 event_sig（subject|aspect）：不同时间的同主体同方面事件
+    必须可区分，但配对裁决仍按真实 [start,end) 区间对拍（见 F-04/F-07）。
+    """
+    return f'{subject}|{aspect}|{time_key}'
+
+
+def _extract_events(text, subject: str = '') -> List[Dict]:
+    """F-06：从文本抽取结构化事件列表（A 层零依赖）。
+
+    逐句抽取（先按标点分句），每句产出若干事件：
+      {'subject': 主体键, 'aspect': 方面, 'value': 数值槽 dict|None,
+       'polarity': 'pos'|'neg', 'time_span': ISO 区间 dict|None,
+       'time_key': 稳定时间键（含完整 [start,end)；无时间='na'）,
+       'event_sig': f'{subject}|{aspect}|{time_key}'（v2.2.0 三元事件身份）}
+    v2.2.0：单句多个时间 span 全部扇出（不再只取 spans[0]）。
+    设计要点：
+      - 分句独立归属数值/方面（修「全文单次扫描」的多事实句串味，F-06）；
+      - 任何解析异常静默降级为空列表，绝不击穿主评分链（与三路健壮性契约一致）。
+    """
+    events: List[Dict] = []
+    if not isinstance(text, str):
+        text = '' if text is None else str(text)
+    subj = subject if isinstance(subject, str) else ''
+    _seen_events: set = set()
+    try:
+        syn = _load_synonyms()
+        aspects = syn.get('aspects', {}) or {}
+    except Exception:
+        return events
+    try:
+        for clause in _split_clauses(text):
+            low = clause.lower()
+            try:
+                membership = _aspect_membership(low, aspects)
+            except Exception:
+                membership = {}
+            if not membership:
+                continue
+            try:
+                numeric = _assign_numbers(low, membership) or {}
+            except Exception:
+                numeric = {}
+            try:
+                spans = _parse_time_spans(clause)
+            except Exception:
+                spans = []
+            # v2.2.0 F-06：单句多个时间 span 全部扇出（不再只取 spans[0]）；
+            #           该句无时间 → 产出一条 time_span=None 的事件。
+            ts_list = spans if spans else [None]
+            for asp in sorted(membership):
+                terms = membership[asp]
+                try:
+                    neg = any(_negated(low, kw, syn) for kw in terms)
+                except Exception:
+                    neg = False
+                vals = numeric.get(asp, []) or []
+                _val = vals[0] if vals else None
+                _pol = 'neg' if neg else 'pos'
+                for ts in ts_list:
+                    _tlabel = ts.get('label', '') if isinstance(ts, dict) else ''
+                    # §2.3 单侧事实去重（五元组，**非**三元事件身份）：
+                    # 同主体+同方面+同值+同极性+同时间标签 → 同一事实，跳过重复。
+                    _dk = (subj, asp, str(_val), _pol, _tlabel)
+                    if _dk in _seen_events:
+                        continue
+                    _seen_events.add(_dk)
+                    _tkey = _stable_time_key(ts)
+                    events.append({
+                        'subject': subj,
+                        'aspect': asp,
+                        'value': _val,
+                        'polarity': _pol,
+                        'time_span': ts,
+                        'time_key': _tkey,
+                        'event_sig': _event_identity(subj, asp, _tkey),
+                    })
+                    if len(events) >= _EVENT_MAX_EVENTS:
+                        return events
+    except Exception:
+        return events
+    return events
+
+
+def _period_adjudicate(events_a, events_b) -> Dict:
+    """F-04 期间裁决（v2.2.0 三元键化）：对「同主体、同方面」事件对做期间比对。
+
+    规则：
+      双方期间均已知且**不相交** → 该方面判为非冲突（disjoint）；
+      期间相同 / 相交 → 走现值冲突规则（overlap）；任一方缺期间 → 跳过该对（不裁决）。
+    事件对按真实 time_span 的 [start,end) 半开区间逐对比较——即使 time_key 不同
+    也不跳过（time_key 只是身份标签，区间关系才是裁决依据）。
+    仅当双方事件主体键非空且相等时才参与（空主体不裁决，保持旧契约）。
+
+    返回：
+      disjoint_slots / overlap_slots : aspect 名列表（旧契约，保持不变）
+      reasons                        : 人类可读理由（旧契约）
+      slot_pairs                     : 逐对审计明细（v2.2.0 新增）
+        [{subject, aspect, time_key_a, time_key_b, label_a, label_b, relation}]
+        relation ∈ disjoint | overlap；聚合：任一 overlap → overlap；全部 disjoint → disjoint
+    """
+    pair_details: List[Dict] = []
+    # 聚合仍按 (subject, aspect)，同方面多个区间对逐一累计
+    agg: Dict[tuple, Dict] = {}
+    for x in (events_a or []):
+        if not isinstance(x, dict):
+            continue
+        sx, ax, tx = x.get('subject'), x.get('aspect'), x.get('time_span')
+        if not sx or not ax or not tx:
+            continue
+        for y in (events_b or []):
+            if not isinstance(y, dict):
+                continue
+            if y.get('subject') != sx or y.get('aspect') != ax:
+                continue
+            ty = y.get('time_span')
+            if not ty:
+                continue
+            tka, tkb = x.get('time_key', 'na'), y.get('time_key', 'na')
+            la = tx.get('label', '') if isinstance(tx, dict) else ''
+            lb = ty.get('label', '') if isinstance(ty, dict) else ''
+            try:
+                relation = 'overlap' if _spans_overlap(tx, ty) else 'disjoint'
+            except Exception:
+                relation = 'overlap'
+            pair_details.append({
+                'subject': sx, 'aspect': ax,
+                'time_key_a': tka, 'time_key_b': tkb,
+                'label_a': la, 'label_b': lb, 'relation': relation})
+            rec = agg.setdefault((sx, ax), {'disjoint': 0, 'overlap': 0,
+                                            'la': la, 'lb': lb})
+            rec[relation] += 1
+    disjoint, overlap, reasons = [], [], []
+    for (_subj, asp), rec in sorted(agg.items()):
+        if rec['disjoint'] > 0 and rec['overlap'] == 0:
+            disjoint.append(asp)
+            reasons.append(
+                f'期间裁决：[{asp}] 同主体同方面期间不相交'
+                f'（{rec["la"]} ↔ {rec["lb"]}）→ 降权（不滤除）')
+        else:
+            overlap.append(asp)
+    return {'disjoint_slots': sorted(set(disjoint)),
+            'overlap_slots': sorted(set(overlap)),
+            'reasons': reasons,
+            'slot_pairs': pair_details}
+
+def _event_time_score(events_a, events_b, subject: str = '') -> Dict:
+    """F-07（v2.2.0）：主体内事件级时间比对。
+
+    仅同主体同方面事件对参与，按真实 [start,end) 区间逐对对拍（不因 time_key
+    不同而跳过）。event_pairs 每项为 dict：
+      {subject, aspect, time_key_a, time_key_b, span_a, span_b, relation}
+    任一对区间 overlap → 非冲突（score=0）；全部 disjoint → 粗粒度 35 / 细粒度 60。
+    """
+    ea = [e for e in (events_a or [])
+          if isinstance(e, dict) and e.get('time_span')
+          and (not subject or e.get('subject') == subject)]
+    eb = [e for e in (events_b or [])
+          if isinstance(e, dict) and e.get('time_span')
+          and (not subject or e.get('subject') == subject)]
+    if not ea and not eb:
+        coverage = 'neither'
+    elif ea and eb:
+        coverage = 'both_timed'
+    else:
+        coverage = 'partial'
+    pair_slots = []
+    if coverage == 'both_timed':
+        for x in ea:
+            for y in eb:
+                if x.get('aspect') and x.get('aspect') == y.get('aspect'):
+                    pair_slots.append((x, y))
+    _slots_a_all = [e['time_span'] for e in ea]
+    _slots_b_all = [e['time_span'] for e in eb]
+    if not pair_slots:
+        # 无「同主体同方面」事件对 → 不可对拍（跨方面/跨主体时间差排除，修 F-07 误报）
+        # coverage 取真实单侧覆盖（both_timed 但跨方面时仍不可对拍 → partial）
+        _cov_nopair = 'partial' if coverage == 'both_timed' else coverage
+        return {'score': 0, 'conflict': False,
+                'time_slots_a': _slots_a_all, 'time_slots_b': _slots_b_all,
+                'reasons': [], 'coverage': _cov_nopair, 'mode': 'event',
+                'event_pairs': [],
+                # v2.2.0 三元身份审计字段（无配对出口同样齐备）
+                'event_time_score': 0,
+                'event_disjoint_slots': [], 'event_overlap_slots': [],
+                'event_slot_keys': []}
+    ta = [x['time_span'] for x, _y in pair_slots]
+    tb = [y['time_span'] for _x, y in pair_slots]
+    event_pairs = []
+    for x, y in pair_slots:
+        try:
+            rel = 'overlap' if _spans_overlap(x['time_span'], y['time_span']) else 'disjoint'
+        except Exception:
+            rel = 'overlap'
+        event_pairs.append({
+            'subject': x.get('subject'), 'aspect': x.get('aspect'),
+            'time_key_a': x.get('time_key', 'na'),
+            'time_key_b': y.get('time_key', 'na'),
+            'span_a': x['time_span'], 'span_b': y['time_span'],
+            'relation': rel})
+    _disjoint_aspects = sorted({p['aspect'] for p in event_pairs
+                                if p['relation'] == 'disjoint' and p['aspect']})
+    _overlap_aspects = sorted({p['aspect'] for p in event_pairs
+                               if p['relation'] == 'overlap' and p['aspect']})
+    _event_slot_keys = sorted({
+        f'{p["subject"] or ""}|{p["aspect"]}|{p.get("time_key_a") or "na"}'
+        for p in event_pairs} | {
+        f'{p["subject"] or ""}|{p["aspect"]}|{p.get("time_key_b") or "na"}'
+        for p in event_pairs})
+    if any(p['relation'] == 'overlap' for p in event_pairs):
+        return {'score': 0, 'conflict': False, 'time_slots_a': ta, 'time_slots_b': tb,
+                'reasons': [], 'coverage': 'both_timed', 'mode': 'event',
+                'event_pairs': event_pairs,
+                'event_time_score': 0,
+                'event_disjoint_slots': _disjoint_aspects,
+                'event_overlap_slots': _overlap_aspects,
+                'event_slot_keys': _event_slot_keys}
+    coarse = all('Q' not in s2['label'] and '月' not in s2['label'] for s2 in ta + tb)
+    score = 35 if coarse else 60
+    la = ' / '.join(f'{p["aspect"]}:{p["span_a"]["label"]}' for p in event_pairs)
+    lb = ' / '.join(f'{p["aspect"]}:{p["span_b"]["label"]}' for p in event_pairs)
+    return {'score': score, 'conflict': True, 'time_slots_a': ta, 'time_slots_b': tb,
+            'coverage': 'both_timed', 'mode': 'event', 'event_pairs': event_pairs,
+            'event_time_score': score,
+            'event_disjoint_slots': sorted({p['aspect'] for p in event_pairs
+                                            if p['aspect']}),
+            'event_overlap_slots': [],
+            'event_slot_keys': _event_slot_keys,
+            'reasons': [f'时间事实冲突（事件级）：[{la}] ↔ [{lb}]'
+                        f'（同主体同方面时间区间不相交）']}
+
+def _event_matches(events_a, events_b) -> List[Dict]:
+    """§4.3：产出事件级对拍明细（仅同主体同方面事件对参与）。
+
+    每条记录 {subject, aspect, time_key_a, time_key_b, time_relation,
+              value_relation, score}（v2.2.0 增加三元身份 time_key 字段）：
+      time_relation:  'disjoint'（期间不相交，非冲突）| 'overlap'（相交/相同）
+                      | 'missing'（任一方缺时间，交由 keyed/legacy 评估）
+      value_relation: 'opposite_polarity' | 'same' | 'different_value' | 'unknown'
+      score:          事件级时间贡献分（disjoint=0；overlap 按粒度 35/60；missing=0）
+    与 period_adjudication 聚合字段互为明细/汇总，供 research report 解释。
+    """
+    out: List[Dict] = []
+    for x in (events_a or []):
+        if not isinstance(x, dict):
+            continue
+        sx, ax = x.get('subject'), x.get('aspect')
+        if not sx or not ax:
+            continue
+        for y in (events_b or []):
+            if not isinstance(y, dict):
+                continue
+            if y.get('subject') != sx or y.get('aspect') != ax:
+                continue
+            tx, ty = x.get('time_span'), y.get('time_span')
+            if tx and ty:
+                try:
+                    tr = 'overlap' if _spans_overlap(tx, ty) else 'disjoint'
+                except Exception:
+                    tr = 'overlap'
+            else:
+                tr = 'missing'
+            pol_x, pol_y = x.get('polarity'), y.get('polarity')
+            if pol_x and pol_y and pol_x != pol_y:
+                vr = 'opposite_polarity'
+            elif x.get('value') is None or y.get('value') is None:
+                vr = 'unknown'
+            elif x.get('value') == y.get('value'):
+                vr = 'same'
+            else:
+                vr = 'different_value'
+            sc = 0 if tr == 'disjoint' else (35 if tr == 'overlap' else 0)
+            out.append({'subject': sx, 'aspect': ax,
+                        'time_key_a': x.get('time_key', 'na'),
+                        'time_key_b': y.get('time_key', 'na'),
+                        'time_relation': tr, 'value_relation': vr, 'score': sc})
+    return out
+
+
+def time_slot_score(text_a, text_b, subject: str = '', subject_b=None,
+                    events_a=None, events_b=None) -> Dict:
+    """P0-OPEN-06：时间事实槽比对（v2.1.2 F-07 扩展主体闸 + 事件级对齐）。
+
+    返回 {score, conflict, time_slots_a, time_slots_b, reasons, coverage[,
+          mode, event_pairs]}。
+      coverage:
+        'both_timed' 双方可对拍（已评估）
+        'partial'    仅一条有时间，或跨主体/无同方面事件对（无法对拍 → 未评估）
+        'neither'    两条都无时间（未评估）
+      conflict=True 仅当双方可对拍且区间两两不相交（同主体同方面时间矛盾）。
+    冲突分：精确粒度（季/月）60（high 边界）；仅全年粗粒度 35（medium，容忍跨年口径）。
+    v2.1.2 行为：
+      - 兼容旧调用 `time_slot_score(text_a, text_b)`（无主体）→ 沿用全文级逻辑，零回归；
+      - 双方主体已知且相等 → **事件级对齐**（仅同主体同方面事件对）；
+      - 双方主体已知但不等 → 跨主体 → 不可对拍（coverage='partial'，不误报）。
+    """
+    # P1(F-12)：公开函数类型守卫（None / 非字符串 → 空串），不依赖调用方预归一。
+    text_a = text_a if isinstance(text_a, str) else ''
+    text_b = text_b if isinstance(text_b, str) else ''
+    sb = subject if subject_b is None else subject_b
+    subject = subject if isinstance(subject, str) else ''
+    sb = sb if isinstance(sb, str) else ''
+
+    # F-07：双方主体已知 → 主体闸 + 事件级对齐
+    if subject and sb:
+        if subject != sb:
+            return {'score': 0, 'conflict': False, 'time_slots_a': [], 'time_slots_b': [],
+                    'reasons': [], 'coverage': 'partial', 'mode': 'event',
+                    'event_pairs': [], 'note': 'cross_subject'}
+        ea = events_a if events_a is not None else _extract_events(text_a, subject)
+        eb = events_b if events_b is not None else _extract_events(text_b, subject)
+        return _event_time_score(ea, eb, subject)
+
+    # 兼容路径（任一主体缺失）→ 旧全文级逻辑（零回归）
     ta = _parse_time_spans(text_a)
     tb = _parse_time_spans(text_b)
     if not ta and not tb:
@@ -634,11 +1072,13 @@ def time_slot_score(text_a: str, text_b: str) -> Dict:
 
     if coverage != 'both_timed':
         return {'score': 0, 'conflict': False, 'time_slots_a': ta,
-                'time_slots_b': tb, 'reasons': [], 'coverage': coverage}
+                'time_slots_b': tb, 'reasons': [], 'coverage': coverage,
+                'mode': 'fulltext', 'event_pairs': []}
 
     if any(_spans_overlap(a, b) for a in ta for b in tb):
         return {'score': 0, 'conflict': False, 'time_slots_a': ta,
-                'time_slots_b': tb, 'reasons': [], 'coverage': coverage}
+                'time_slots_b': tb, 'reasons': [], 'coverage': coverage,
+                'mode': 'fulltext', 'event_pairs': []}
 
     coarse = all('Q' not in s['label'] and '月' not in s['label']
                  for s in ta + tb)
@@ -647,6 +1087,7 @@ def time_slot_score(text_a: str, text_b: str) -> Dict:
     lb = ' / '.join(s['label'] for s in tb)
     return {'score': score, 'conflict': True, 'time_slots_a': ta,
             'time_slots_b': tb, 'coverage': coverage,
+            'mode': 'fulltext', 'event_pairs': [],
             'reasons': [f'时间事实冲突：[{la}] ↔ [{lb}]（时间区间不相交）']}
 
 
@@ -673,7 +1114,8 @@ def _detect_negation(text_a: str, text_b: str) -> Tuple[int, List[str]]:
     """返回 (neg_score 0-50, reason_list)"""
     score = 0
     reasons = []
-    a_low, b_low = text_a.lower(), text_b.lower()
+    # DEF-15：与 _extract_slots / keyed / time 路统一 50k 有界窗口，防长文本全文 .lower() 超时
+    a_low, b_low = _slot_window(text_a).lower(), _slot_window(text_b).lower()
 
     # 1. 否定词（豁免"持平/不变"等非对立用法）
     hit_a = _neg_hits(a_low)
@@ -746,8 +1188,19 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
         'no_conflict'       已充分评估（双方都有可对拍事实槽）且未发现冲突
         'not_assessable'    未评估——双方均缺可对拍事实槽（无时间/无键控槽/无共享槽）
     """
-    text_a = claim_a.get('text', '') if isinstance(claim_a, dict) else str(claim_a)
-    text_b = claim_b.get('text', '') if isinstance(claim_b, dict) else str(claim_b)
+    # P1(F-12)：入参文本归一化。claim 为 dict 但 text=None（或 text 为数字等
+    # 非字符串）时，旧代码 text_a=None 直接传入 score_legacy（未 try 包裹）→
+    # `_detect_negation`/`_extract_slots` 调 None.strip()/lower() 抛 AttributeError，
+    # 击穿整个矛盾评分。统一在入口归一：None / 非字符串 → 空串（不当 'None'/'123'
+    # 字面量参与比对，避免伪造矛盾）；非 dict 入参沿用 str() 容错（None→''）。
+    def _claim_text(c):
+        if not isinstance(c, dict):
+            return str(c) if c is not None else ''
+        v = c.get('text', '')
+        return v if isinstance(v, str) else ''
+
+    text_a = _claim_text(claim_a)
+    text_b = _claim_text(claim_b)
 
     # 路 1：v2.4.x 原口径（Jaccard 槽 + 否定/反义）
     legacy = score_legacy(claim_a, claim_b, text_a, text_b)
@@ -762,15 +1215,35 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
     except Exception:
         keyed = {'conflict_slots': [], 'reasons': [],
                  'slots_a': {}, 'slots_b': {}}
-    # 路 3：P0-OPEN-06 时间事实槽（年月/季度 → ISO 区间比对）
+    # 路 3：P0-OPEN-06 时间事实槽（年月/季度 → ISO 区间比对）；
+    #       v2.1.2 F-07：加主体闸 + 事件级对齐（主体已知时只比对同主体同方面事件）。
     # 容错：时间解析依赖正则，任何异常（如外部 mock re）都不得击穿主评分，
     # 降级为"未评估"，与 keyed 路的健壮性契约一致（L3-05 守护）。
+    subj_a = _subject_key(claim_a, text_a)
+    subj_b = _subject_key(claim_b, text_b)
+    # F-06：事件优先取 claim 携带的（生产链在**原始 body** 上抽取，跨越 500/300 两级截断）；
+    #      缺失则就地兜底抽取（直调 / 旧调用兼容）。抽取异常一律降级空列表。
+    ev_a, ev_b = [], []
     try:
-        tslot = time_slot_score(text_a, text_b)
+        ev_a = (claim_a.get('events') if isinstance(claim_a, dict)
+                and claim_a.get('events') is not None
+                else _extract_events(text_a, subj_a))
+        ev_b = (claim_b.get('events') if isinstance(claim_b, dict)
+                and claim_b.get('events') is not None
+                else _extract_events(text_b, subj_b))
+    except Exception:
+        ev_a, ev_b = [], []
+    try:
+        tslot = time_slot_score(text_a, text_b, subj_a, subj_b, ev_a, ev_b)
         time_score_val = tslot['score']
     except Exception:
         tslot = {'score': 0, 'reasons': [], 'coverage': 'neither',
-                 'time_slots_a': [], 'time_slots_b': [], 'conflict': False}
+                 'time_slots_a': [], 'time_slots_b': [], 'conflict': False,
+                 'mode': 'fulltext',
+                 # v2.2.0 事件字段异常兜底齐备（顶层 .get 不再恒取默认空）
+                 'event_time_score': 0, 'event_pairs': [],
+                 'event_disjoint_slots': [], 'event_overlap_slots': [],
+                 'event_slot_keys': []}
         time_score_val = 0
 
     # max 融合：三路证据取强，不叠加（避免同义复述被相似度抬分）
@@ -787,6 +1260,13 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
     for _sc, _m, _rs in trio[1:]:
         if _sc > 0:
             reasons.extend(_rs)
+
+    # ── F-04 期间裁决（v2.1.2）：同主体同方面且双方期间均已知且不相交 →
+    #   判为非冲突，落地为**降权**（×0.5，最低保留 1）——只降权、不滤除、不归零。
+    adj = _period_adjudicate(ev_a, ev_b)
+    if adj['disjoint_slots'] and total > 0:
+        total = max(1, int(round(total * _PERIOD_DISJOINT_DAMP)))
+        reasons = reasons + adj['reasons']
 
     # ── P0-OPEN-06：无冲突 / 未评估 区分（覆盖率）──
     # 可对拍事实槽覆盖：键控槽交集（同主体同方面）、时间双侧、legacy 共享槽。
@@ -824,6 +1304,26 @@ def score_contradiction(claim_a: Dict, claim_b: Dict) -> Dict:
         'time_coverage': tslot['coverage'],
         'assessable': assessable,
         'verdict': verdict,
+        # v2.1.2 事件槽批次（F-06 事件计数 / F-04 期间裁决 / F-07 time 路模式）
+        'event_count_a': len(ev_a),
+        'event_count_b': len(ev_b),
+        'period_disjoint_slots': adj['disjoint_slots'],
+        'period_overlap_slots': adj['overlap_slots'],
+        'period_pair_details': adj.get('slot_pairs', []),
+        'period_adjudication': ('disjoint' if adj['disjoint_slots']
+                                else 'overlap' if adj['overlap_slots'] else 'none'),
+        'time_mode': tslot.get('mode', 'fulltext'),
+        # §4.3 事件级对拍明细（与 period_adjudication 互为明细/汇总）
+        'event_matches': _event_matches(ev_a, ev_b),
+        # v2.2.0 事件时间路审计字段（三元事件身份对拍明细，向各调用路径收口）
+        'event_time_score': tslot.get('event_time_score', 0),
+        'event_pairs': tslot.get('event_pairs', []),
+        'event_disjoint_slots': tslot.get('event_disjoint_slots', []),
+        'event_overlap_slots': tslot.get('event_overlap_slots', []),
+        'event_slot_keys': tslot.get('event_slot_keys', []),
+        # v2.2.0 B 层时间槽抑制明细（纯 A 层调用默认空；hybrid 路径由 LLM 层覆盖）
+        'llm_time_suppressed': [],
+        'llm_time_suppressed_slots': [],
     }
 
 
@@ -852,22 +1352,32 @@ def score_with_llm(claim_a: Dict, claim_b: Dict, llm_router=None) -> Dict:
     )
     try:
         raw = llm_router(prompt)
-        m = re.search(r'\d{1,3}', raw or '')
+        # v2.2.0：router 合法返回 None/非字符串时归一化，避免 raw.strip() 抛错
+        # 被外层 except 误判为异常降级（llm_used 应保持 True）。
+        raw = raw if isinstance(raw, str) else str(raw or '')
+        m = re.search(r'\d{1,3}', raw)
         score = int(m.group(0)) if m else 0
         score = max(0, min(score, 100))
         local = score_contradiction(claim_a, claim_b)
         # 取 LLM 与本地的较大值（任一一方强烈判矛盾都尊重）
         final = max(score, local['score'])
-        return {
+        # v2.2.0 收口：以完整 A 层结果为底（自动携带全部 keyed/event/period/
+        # 三元槽字段），仅覆盖 LLM 相关字段——杜绝内联白名单在版本演进时漏挂。
+        result = dict(local)
+        result.update({
             'score': final,
             'severity': 'high' if final >= 75 else 'medium' if final >= 45
                        else 'low' if final >= 15 else 'none',
             'reasons': local['reasons'] + [f'LLM={score}'],
             'neg_hits': local['reasons'],
-            'shared_slots': local['shared_slots'],
             'llm_used': True,
             'llm_raw': raw.strip()[:200],
-        }
+        })
+        # 同步路径不做 B 层时间槽 disjoint 抑制，但显式挂空审计字段，
+        # 保证跨路径字段齐备。
+        result.setdefault('llm_time_suppressed', [])
+        result.setdefault('llm_time_suppressed_slots', [])
+        return result
     except Exception as e:
         res = score_contradiction(claim_a, claim_b)
         res['llm_used'] = False
@@ -888,9 +1398,9 @@ _LLM_SLOT_CACHE_MAX = 512
 _LLM_SLOT_PROMPT = """你是事实核查助手。从下面这条声明中抽取结构化事实槽，只输出 JSON，不要解释。
 
 输出 schema：
-{"slots": [{"subject": "主体(原文实体，无法判断用空串)", "aspect": "方面英文蛇形命名(如 revenue/profit/ceo_name/hq_city/founded_year)", "value": "归一化值(数字尽量转阿拉伯数字；枚举用小写中文或英文)", "unit": "单位(%, 亿, 万, 年, 人, 个, 或空串)", "polarity": "pos|neg|neutral"}]}
+{"slots": [{"subject": "主体(原文实体，无法判断用空串)", "aspect": "方面英文蛇形命名(如 revenue/profit/ceo_name/hq_city/founded_year)", "value": "归一化值(数字尽量转阿拉伯数字；枚举用小写中文或英文)", "unit": "单位(%, 亿, 万, 年, 人, 个, 或空串)", "polarity": "pos|neg|neutral", "time_label": "该事实对应的时间标签原文(如 2024年/2024Q1/2024年上半年/截至2023年，无法判断留空串)", "time_start": "时间起点整数年份YYYY(季度月度归并到该年，无法判断留空串)", "time_end": "时间终点整数年份YYYY(闭区间结束年；单年事实与time_start相同；无法判断留空串)"}]}
 规则：
-1) 抽取该声明的核心事实槽，忽略评价性措辞；同一方面只保留最确定的一个值。
+1) 抽取该声明的核心事实槽，忽略评价性措辞；同一方面若在不同时间各有明确取值，必须分别输出为多个槽(各自带时间字段)，不要只保留一个值；确实没有时间归属的事实 time_label/time_start/time_end 留空串。
 2) 数值统一为阿拉伯数字并标注 unit；百分比 unit 用 %。
 3) 布尔/肯否事实（如是否开源、是否发布）polarity 用 pos/neg，value 用枚举词。
 4) 只输出 JSON。
@@ -932,76 +1442,139 @@ def _norm_num(v, unit):
     return f, (unit or "").strip()
 
 
-def _llm_slot_conflicts(slots_a: list, slots_b: list):
-    """复用键控比对思想：同 (主体键, aspect) 比 value/unit/polarity。
+def _llm_slot_span(slot: dict):
+    """从 LLM 槽取可严格解析的半开区间 dict{label,start,end}（ISO [start,end)）。
 
-    表外方面（LLM 动态命名，如 ceo_name）同样参与。产出 (dedup_key, reason, aspect)。
+    优先 time_start/time_end（均须为 4 位 YYYY 整数年，闭区间年→次年 01-01 半开）；
+    退化用 time_label 经 _parse_time_spans 严格解析（年/季/月，支持「2024年」「2024Q1」）。
+    返回 dict 或 None（任一时间缺失/模糊 → None，调用方走保守比对）。
+    """
+    if not isinstance(slot, dict):
+        return None
+    label = str(slot.get("time_label", "") or "").strip()
+    ts = str(slot.get("time_start", "") or "").strip()
+    te = str(slot.get("time_end", "") or "").strip()
+
+    # 优先：time_start/time_end 均为 4 位年（YYYY 闭区间年 → [YYYY-01-01, (YYYY+1)-01-01)）
+    ms, me = re.match(r"^(\d{4})$", ts), re.match(r"^(\d{4})$", te)
+    if ms and me:
+        ys, ye = int(ms.group(1)), int(me.group(1))
+        if ye >= ys:
+            return {"label": label or f"{ts}-{te}",
+                    "start": f"{ys:04d}-01-01", "end": f"{ye + 1:04d}-01-01"}
+
+    # 退化：time_label 严格解析（_parse_time_spans 仅抽年/季/月，模糊表述返回空）
+    if label:
+        parsed = _parse_time_spans(label)
+        if len(parsed) == 1:
+            return parsed[0]
+    return None
+
+
+def _slots_disjoint(span_a, span_b) -> bool:
+    """两个 ISO [start,end) 区间是否不相交（端点相接算 disjoint；与 _spans_overlap 互补）。"""
+    if not span_a or not span_b:
+        return False
+    return not _spans_overlap(span_a, span_b)
+
+
+def _llm_slot_conflicts(slots_a: list, slots_b: list):
+    """同 (主体, aspect) 槽位笛卡尔逐对比对 value/unit/polarity。
+
+    v2.2.0：一对槽若双方时间均可严格解析且 [start,end) 不相交，则不判
+    冲突（不同时期不同取值），计入 suppressed 明细；任一侧时间缺失或
+    模糊时维持保守比对（旧 LLM 无时间字段 → 行为与 v2.1.2 一致）。
+    返回 (conflicts, suppressed)。
     """
     def index(slots):
         out = {}
-        for s in slots:
-            if not isinstance(s, dict):
+        for sl in slots:
+            if not isinstance(sl, dict):
                 continue
-            asp = str(s.get("aspect", "")).strip().lower()
+            asp = str(sl.get("aspect", "")).strip().lower()
             if not asp:
                 continue
-            subj = re.sub(r"\s+", "", str(s.get("subject", "")).lower())
-            out.setdefault((subj, asp), []).append(s)
+            subj = re.sub(r"\s+", "", str(sl.get("subject", "")).lower())
+            out.setdefault((subj, asp), []).append(sl)
         return out
 
     ia, ib = index(slots_a), index(slots_b)
     conflicts = []
+    suppressed = []
     seen = set()
+    seen_supp = set()
     for key in set(ia) & set(ib):
         subj, asp = key
-        # 主体不同（且都非全局空键）不比
-        ka = next(iter(ia[key])); kb = next(iter(ib[key]))
-        # 极性冲突
-        pa, pb = ka.get("polarity"), kb.get("polarity")
-        if pa and pb and pa in ("pos", "neg") and pb in ("pos", "neg") and pa != pb:
-            ck = ("llm-pol", subj, asp)
-            if ck not in seen:
-                seen.add(ck)
-                conflicts.append((ck, f"[LLM:{asp}] 肯否冲突", asp))
-            continue
-        na = _norm_num(ka.get("value"), ka.get("unit"))
-        nb = _norm_num(kb.get("value"), kb.get("unit"))
-        if na and nb:
-            (xa, ua), (xb, ub) = na, nb
-            if ua == ub:  # 同量纲才比
-                base = max(abs(xa), abs(xb), 1.0)
-                rel = abs(xa - xb) / base
-                if asp.endswith("year"):
-                    hit = abs(xa - xb) >= 1
-                elif ua == "%":
-                    hit = abs(xa - xb) >= 3 and rel >= 0.15
-                else:
-                    hit = rel >= 0.15
-                if hit:
-                    ck = ("llm-num", subj, asp, round(min(xa, xb), 4),
-                          round(max(xa, xb), 4), ua)
+        for ka in ia[key]:
+            for kb in ib[key]:
+                spa = _llm_slot_span(ka)
+                spb = _llm_slot_span(kb)
+                va0 = str(ka.get("value", "")).strip()
+                vb0 = str(kb.get("value", "")).strip()
+                if _slots_disjoint(spa, spb):
+                    ck = ("llm-time", subj, asp, spa.get("label"), spb.get("label"), va0, vb0)
+                    if ck not in seen_supp:
+                        seen_supp.add(ck)
+                        suppressed.append({
+                            "subject": subj, "aspect": asp,
+                            "time_label_a": spa.get("label"), "time_label_b": spb.get("label"),
+                            "span_a": {"start": spa.get("start"), "end": spa.get("end")},
+                            "span_b": {"start": spb.get("start"), "end": spb.get("end")},
+                            "value_a": va0, "value_b": vb0,
+                            "kind": "time_disjoint",
+                        })
+                    continue
+                pa, pb = ka.get("polarity"), kb.get("polarity")
+                if pa and pb and pa in ("pos", "neg") and pb in ("pos", "neg") and pa != pb:
+                    ck = ("llm-pol", subj, asp)
                     if ck not in seen:
                         seen.add(ck)
-                        conflicts.append((ck, f"[LLM:{asp}] 数值冲突 {xa:g}{ua}↔{xb:g}{ua}", asp))
-        else:
-            va = str(ka.get("value", "")).strip().lower()
-            vb = str(kb.get("value", "")).strip().lower()
-            if va and vb and va != vb:
-                ck = ("llm-enum", subj, asp, va, vb)
-                if ck not in seen:
-                    seen.add(ck)
-                    conflicts.append((ck, f"[LLM:{asp}] 枚举冲突 {va}↔{vb}", asp))
-    return conflicts
-
+                        conflicts.append((ck, f"[LLM:{asp}] 肯否冲突", asp))
+                    continue
+                na = _norm_num(ka.get("value"), ka.get("unit"))
+                nb = _norm_num(kb.get("value"), kb.get("unit"))
+                if na and nb:
+                    (xa, ua), (xb, ub) = na, nb
+                    if ua == ub:
+                        base = max(abs(xa), abs(xb), 1.0)
+                        rel = abs(xa - xb) / base
+                        if asp.endswith("year"):
+                            hit = abs(xa - xb) >= 1
+                        elif ua == "%":
+                            hit = abs(xa - xb) >= 3 and rel >= 0.15
+                        else:
+                            hit = rel >= 0.15
+                        if hit:
+                            ck = ("llm-num", subj, asp, round(min(xa, xb), 4),
+                                  round(max(xa, xb), 4), ua)
+                            if ck not in seen:
+                                seen.add(ck)
+                                conflicts.append((ck, f"[LLM:{asp}] 数值冲突 {xa:g}{ua}↔{xb:g}{ua}", asp))
+                else:
+                    va = va0.lower()
+                    vb = vb0.lower()
+                    if va and vb and va != vb:
+                        ck = ("llm-enum", subj, asp, va, vb)
+                        if ck not in seen:
+                            seen.add(ck)
+                            conflicts.append((ck, f"[LLM:{asp}] 枚举冲突 {va}↔{vb}", asp))
+    return conflicts, suppressed
 
 def _llm_keyed_score(parsed_a: dict, parsed_b: dict) -> dict:
-    """对两份 LLM 槽表做键控冲突评分（复用单冲突 35/双 60/≥3 85 裁决）。"""
-    conflicts = _llm_slot_conflicts(parsed_a.get("slots", []), parsed_b.get("slots", []))
+    """对两份 LLM 槽表做键控冲突评分（单 35/双 60/≥3 85）。
+
+    v2.2.0：时间不相交的异值槽对被抑制，不计冲突，明细经
+    llm_time_suppressed(_slots) 透出审计。
+    """
+    conflicts, suppressed = _llm_slot_conflicts(
+        parsed_a.get("slots", []), parsed_b.get("slots", []))
     n = len({c[0] for c in conflicts})
     score = 85 if n >= 3 else 60 if n == 2 else 35 if n == 1 else 0
     return {"score": score,
             "conflict_slots": sorted({c[2] for c in conflicts}),
-            "reasons": [c[1] for c in conflicts]}
+            "reasons": [c[1] for c in conflicts],
+            "llm_time_suppressed": suppressed,
+            "llm_time_suppressed_slots": sorted({sp["aspect"] for sp in suppressed})}
 
 
 def score_contradiction_hybrid(claim_a: Dict, claim_b: Dict, *,
@@ -1020,6 +1593,8 @@ def score_contradiction_hybrid(claim_a: Dict, claim_b: Dict, *,
             in ("1", "true", "on", "yes")
     if not enable_llm:
         base["llm_used"] = False
+        base["llm_time_suppressed"] = []
+        base["llm_time_suppressed_slots"] = []
         return base
 
     text_a = claim_a.get("text", "") if isinstance(claim_a, dict) else str(claim_a)
@@ -1055,6 +1630,10 @@ def score_contradiction_hybrid(claim_a: Dict, claim_b: Dict, *,
                                         | set(llm_res["conflict_slots"]))
         base["reasons"] = base.get("reasons", []) + [
             r for r in llm_res["reasons"] if r not in base.get("reasons", [])]
+        supp = llm_res.get("llm_time_suppressed", [])
+        base["llm_time_suppressed"] = supp
+        base["llm_time_suppressed_slots"] = llm_res.get(
+            "llm_time_suppressed_slots", [])
         base["score"] = final_score
         base["severity"] = _sev(final_score)
         base["scorer_mode"] = "llm_hybrid" if llm_res["score"] > 0 else base["scorer_mode"]
@@ -1063,6 +1642,8 @@ def score_contradiction_hybrid(claim_a: Dict, claim_b: Dict, *,
     except Exception as e:
         # 降级链：B 失败 → A/legacy（base 已是其结果）
         base["llm_used"] = False
+        base.setdefault("llm_time_suppressed", [])
+        base.setdefault("llm_time_suppressed_slots", [])
         base["llm_error"] = f"{type(e).__name__}:{str(e)[:80]}"
         return base
 
@@ -1111,21 +1692,30 @@ async def score_with_llm_async(claim_a: Dict, claim_b: Dict, llm_router=None) ->
             raw = await llm_router(prompt)
         else:
             raw = await asyncio.to_thread(llm_router, prompt)
-        m = re.search(r'\d{1,3}', raw or '')
+        # v2.2.0：router 合法返回 None/非字符串时归一化（同步路径对齐）。
+        raw = raw if isinstance(raw, str) else str(raw or '')
+        m = re.search(r'\d{1,3}', raw)
         score = int(m.group(0)) if m else 0
         score = max(0, min(score, 100))
         local = await asyncio.to_thread(score_contradiction, claim_a, claim_b)
         final = max(score, local['score'])
-        return {
+        # v2.2.0 收口：以完整 A 层结果为底（自动携带全部 event/period/三元槽字段），
+        # 仅覆盖 LLM 相关字段——杜绝内联白名单在版本演进时漏挂。
+        result = dict(local)
+        result.update({
             'score': final,
             'severity': 'high' if final >= 75 else 'medium' if final >= 45
                        else 'low' if final >= 15 else 'none',
             'reasons': local['reasons'] + [f'LLM={score}'],
             'neg_hits': local['reasons'],
-            'shared_slots': local['shared_slots'],
             'llm_used': True,
             'llm_raw': raw.strip()[:200],
-        }
+        })
+        # 异步路径当前不做 B 层时间槽 disjoint 抑制（保持既有语义），
+        # 但显式挂空审计字段，保证跨路径字段齐备。
+        result.setdefault('llm_time_suppressed', [])
+        result.setdefault('llm_time_suppressed_slots', [])
+        return result
     except Exception as e:
         res = await asyncio.to_thread(score_contradiction, claim_a, claim_b)
         res['llm_used'] = False
