@@ -23,8 +23,16 @@ core/identity_aggregator.py — Maigret × Sherlock 双源聚合去重引擎（v
 from __future__ import annotations
 
 import re
+import sys
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, unquote
+from pathlib import Path as _eg_p
+
+# G8-apply: 公共入口类型契约守卫（纯 stdlib，scripts/entry_guard.py）
+_eg_dir = str(_eg_p(__file__).resolve().parent.parent / 'scripts')
+if _eg_dir not in sys.path:
+    sys.path.insert(0, _eg_dir)
+from entry_guard import (require_text, require_mapping, require_sequence, coerce_mapping_list)
 
 # 双源同时命中的置信增强幅度（封顶 1.0）
 CROSS_SOURCE_BOOST = 0.10
@@ -143,6 +151,8 @@ def aggregate(results_by_source: Dict[str, List[Dict]],
         "duplicates": [(key, [sources...]), ...],   # 跨源命中的去重记录
       }
     """
+    # G8-apply: 类型契约守卫（拒绝 None/非映射 → 受控 TypeError，替代 None.items 崩溃）
+    require_mapping(results_by_source, "results_by_source")
     base_confidence = base_confidence or {}
     merged: Dict[Tuple[str, str], Dict] = {}
     order: List[Tuple[str, str]] = []

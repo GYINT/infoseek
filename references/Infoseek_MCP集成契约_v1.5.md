@@ -13,7 +13,7 @@
 
 > ⚠️ 无 `--transport http` 选项（`--transport` 仅接受 `stdio` / `sse`）；HTTP 形态经 SSE 端点的 `/rpc` 提供。
 
-## 2. 工具面（13 个规范工具）
+## 2. 工具面（18 个规范工具）
 
 ### v3.0 核心（2）
 
@@ -37,6 +37,16 @@
 | `conflict_detection_async` | sources*, subject | 跨源矛盾检测 |
 | `score_source_async` | query*, source* | 单源评分 |
 | `score_contradiction_async` | claim_a*, claim_b* | 两句矛盾评分 |
+
+### v1.x 能力扩展（5）
+
+| 工具 | 参数 | 说明 |
+|------|------|------|
+| `manage_keys` | action*, provider, fingerprint | Key 生命周期管理（list/stat/rotate/revoke，输出脱敏） |
+| `key_usage` | — | Key 用量 / 成本报表 |
+| `qcm_query` | query*, form | 反向调用 QCM（4 形态；未安装优雅降级） |
+| `identity_attribution` | username*, consent, max_results | 身份归因（需 env + consent 双闸） |
+| `account_forensics` | dataset*, consent, target_accounts | 账号四层深度取证（L1 统计 / L2 图结构 / 时序同步 / L3 ML） |
 
 ### 废弃并存期（12）
 

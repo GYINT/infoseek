@@ -1,5 +1,190 @@
 # Changelog
 
+## [2.6.0] - 2026-10-06（NER 性能优化四阶段 A/B/C：热点正则扇出改 Aho-Corasick 自动机单次扫描）
+
+> 触发：用户指令「规划 A→B→C→D 任务路径，审计缺口自主执行，每阶段回归测试；C2 允许引入 aho_corasick」。cProfile 实测 NER 的 `_match_entity` 正则扇出 292146 次 / cum 11.546s，为全链第一热点；research(2k lite) 基线 P50 57.4s。
+>
+> 四阶段（每阶段全量回归全绿：A/B/C 均 85 PASS / 0 FAIL）：
+> - **A 快速收益**：EntityAliases 模块级单例、extract_entities_cached NER 结果缓存，消除重复初始化与重复 NER。
+> - **B 静态预算重构**：normalize 正则预编译（_WHITESPACE_RE/_LATIN_EDGE_RE）、_boundary_pattern 缓存、_budget_entity 按 id 缓存实体归一化预算（name/aliases 归一化 + 指纹失效），去重复归一化。
+> - **C1 热点正则预编译（不引新库）**：边界正则预编译，正则对象复用。
+> - **C2 Aho-Corasick（pyahocorasick）**：name/static alias/hot/cold 动态别名统一负载（6 元组 eid/kind/raw/pat/priority/order）一次 `automaton.iter` 扫描，_ac_scan 输出权威命中槽；extract_entities 权威路径只对未命中实体补跑动态别名正则，未命中再走 hot→static→cold 降级。pyahocorasick 缺失或构建失败静默 `authoritative=False` 回退原正则扇出（INFOSEEK_AC_DISABLE 可关）。
+>
+> 效果（scripts/perf_baseline_v101.py --scale 1000 --rounds 3）：
+> - extract_entities cum 24.963s → 9.873s（约 2.5×）；`_match_entity` 292146 次/11.546s → 近 0；NER 占比 55% → 约 43%，不再是第一热点。
+> - detect_conflicts_v3 P50 16.9s → 6.1s（约 2.8×）；research(2k lite) P50 57.4s → 25.2s（约 2.3×）。
+> - 新第一热点：entity_tracker.record_hit/_save_state 高频 JSON 落盘（既有机制，本次不动）。
+>
+> 守护：tests/test_aho_corasick_c2.py（29 断言）；D-6 文档状态同步联动。
+
+## [2.5.0] - 2026-10-05（意图槽门控堵主题漂移：相关性三路径统一过槽 + 图谱邻域意图感知 + L2 渲染恢复实测）
+
+> 触发：用户指令「先A后B，规划任务审计缺口自主执行，验证效果」。中文长尾实网暴露 360/Kimi/天工 三端点召回中混入大量同实体主题漂移页（旅游/百科/文旅），旧相关性门控边缘分与保底机制将其当相关结果漏出。
+>
+> 变更（方向 B，pipeline mod-v1.4.1→1.5.0）：
+> - 意图槽体系：7 组触发词（price/purchase/output/market/rank/guide/company），query 字面匹配不依赖分词；核心实体词剔除意图词与限定词。
+> - `_passes_intent`：主门槛/floor 保底/二级 top-k 三路径统一过意图槽；trade 同族（price/purchase/market）簇内任一组回显即过，避免误杀只含「收购」不含「价格」的真相关页；跨族仍各自必须回显。
+> - B-3 图谱邻域收紧：带意图槽长尾 query 默认跳过图谱邻居，防止邻域引入跨主题扩展；`INFOSEEK_RECALL_GRAPH_INTENT=1` 恢复旧行为，纯实体 query 不受影响。
+> - F 组异常修复：`_filter_relevant` 外层异常记日志返回 `[]`，不再裸返全量。
+> - 门控总开关 `INFOSEEK_INTENT_GATE=0` 回退旧语义。
+>
+> 方向 A（L2 渲染恢复，实测负结果但能力保留）：
+> - 恢复系统 chromium 154 + playwright 1.63 + stealth，sannysoft 31 项检测全过；pipeline `_render_html` 接线正确。
+> - 5 长尾词 × 3 端点 L1/L2 对拍：360 数据中心 IP 滑块墙、Kimi/天工 `?q=` 未承接查询且需登录态——渲染真实发生但对当前 3 端点增益=0。能力保留供通用 JS 壳页与未来住宅 IP 部署。
+>
+> 验证：新增守护 test_intent_gate_b150.py（23 断言，A-H 组全离线）；实网对拍 query「信阳板栗最新收购价格」漂移漏出 3→0、真相关页全部保留；相关既有套件零回归。
+
+## [2.4.1] - 2026-10-04（GA12 薄壳漏标修复：品牌官网首页壳判定 + 防误杀三门控）
+
+> 触发：用户指令「修薄壳漏标」。中文长尾实测暴露 Kimi 探索版/天工 AI 静态抓取返回根域名 SPA 官网首页（通用营销文案，与查询无关），旧判定仅承认标题精确等于「首页/官网」，二者绕过被当有效结果召回。
+>
+> 变更：
+> - 判定分层：captcha/login 静态阶段即拦；thin_home 从静态剥离，延后到渲染尝试之后对最终页 `allow_thin=True` 补判，不短路 L2 渲染门控（守护 L1/L3 契约保持）。
+> - 新增 `_is_thin_home()`，三重防误杀门：①查询词回显→不判 ②正文含结果列表结构词（搜索结果/相关搜索/共找到…）→不判 ③品牌强壳词（如「智能体先行者」，正文可长）或通用官网词（须正文<600）命中标题才判。
+> - 标记常量拆为三组：通用标题/品牌强壳/结果列表。
+> - 守护 `test_netguard_ga12.py` 新增 TH 组 9 断言；真实三端点对拍：360 captcha、Kimi/天工 thin_home 全部正确降级，真实结果页不误杀。
+>
+> 测试：全量 **84 PASS / 0 SKIP / 0 FAIL**（229s）；D-6 文档守护 29/29；netguard_ga12 46 PASS（原 37 + 新增 9）。pipeline mod-v1.4.0 → 1.4.1。
+
+## [2.4.0] - 2026-10-02（P1 长尾中文召回增强：CJK 引擎优先路由 + 评估基准 + 网络兜底）
+
+> 触发：用户指令「P1-CN2/CN3/CN4 评估路径，审计缺口后自主执行」。
+> 主链路新增长尾中文路由能力（仅对判定为长尾中文的 query 生效），变动量 >30% 于长尾召回路径，bump 第二位 → v2.4.0。
+>
+> - **P1-CN2 CJK query 中文引擎优先路由**：长尾中文（CJK 字数 ≥6）在 `_default_layer` 前置 CN-AI-Web，`_engine_weight_for` 权重 0.3→封顶 1.0；`INFOSEEK_CN_PRIORITY=0` 可回退。
+> - **P1-CN3 长尾中文评估基准**：新增 `tests/test_longtail_cn_benchmark_cn3.py`（46 断言，全离线）覆盖 A/B/C/D/D+ 五层；台账 `references/cn3-longtail-benchmark-ledger.md`。
+> - **P1-CN4 部署侧网络边界兜底**：`_search_cn_web` 调用前经 `net_probe.check_hosts` 预判过滤不可达端点（`INFOSEEK_CN_NETGUARD` 默认开），探测异常保守保留全部，逐端点 try/except 不污染主链。
+> - pipeline mod-v1.2.1→1.3.0；标准套件 82→83、测试文件 83→84。
+
+## [2.3.3] - 2026-10-01（事实槽召回增强 + research 性能优化 + domain_bonus 复核 + G8 销账）
+
+> 触发：用户指令「①②④⑤⑥ 自主执行」。**hybrid 接线 + 词典扩充 + NER 热路径优化**，
+> 变动量 10–30%，bump 第三位 → v2.3.3。
+>
+> - **④矛盾检测长叙述句事实槽召回增强**：B 层 LLM 结构化槽 hybrid 策略接线
+>   `score_contradiction_hybrid`（默认 OFF 返 base，env `INFOSEEK_CONTRADICTION_LLM` 开启）；
+>   方面簇词典 24→36 簇、中文 160→267 词（contradiction-synonyms.json v1.2.0）；三态冒烟通过。
+> - **⑥research 全链路性能优化**：NER `_boundary_pattern` 模块级缓存，3000 源 research
+>   262.5s→115.4s（-56%，2.27×），冲突检测 124.3s→48.9s（-61%）。
+> - **⑤domain_bonus 收口复核**：逐行对拍链 A/链 B 均经 `aggregate_score_v2()` 聚合，无双重计分。
+> - **②G8-apply 销账**：脚本式守护 21 PASS / 0 FAIL，非法输入全受控，无口径矛盾。
+
+## [2.3.2] - 2026-09-30（方向二 S6/S7：浏览器探测收口 + 外部依赖消费点统一迁移）
+
+> 触发：用户指令「执行 S6 和 S7」。**行为保持型重构（零逻辑变更、逐点零漂移对拍）**：
+> 将分散在各模块的浏览器/外部依赖探测收口到 `core/dep_registry.py` 统一求值，
+> 组合/降级逻辑仍留本层。涉及 11 文件、13+ 探测调用点，变动量 10–30%，bump 第三位 → v2.3.2。
+
+### ① S6 浏览器探测收口（`scripts/l2_renderer.py`，mod-v 不变）
+- chromium / chromium-headless-shell / playwright / camoufox / patchright 的 `path:` 求值改经
+  `dep_registry.has_module` / `which_path`；camoufox 目录非空判定 `_camoufox_dir_nonempty()` 保留。
+- 收口前后 import/path/env/which 四路径返回值逐一对拍，**0 DRIFT**。
+
+### ② S7 消费点分批迁移（9 脚本 + extensions/qcm/tracing.py + summarize_adapter.py）
+- 可选/降级点统一用 `is_available`（registry 依赖名），必报错点用 `require`，
+  须感知 sys.modules 注入/探测真实 import 名用 `has_module`，CLI 取路径用 `which_path`。
+- jieba/pypinyin 维持 `delegate` 委托 `core/jieba_bridge.py`，无双轨；
+  whisper 门控用 `has_module("whisper")`（无缓存、先查 sys.modules，兼容测试 mock）。
+- required `import yaml`（domain_orchestrator/domain_router/exporter）与 OTLP 子包按裁决保留不迁移。
+
+### ③ 验证
+- **全量回归 81 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT（338s，ALL GREEN）**，套件数与 S5 后一致（未新增测试套件）。
+
+## [2.3.1] - 2026-09-30（方向一阶段C：learned 锚点自动晋级真锚 + 主链显式开关接线）
+
+> 触发：用户指令「执行 S5 晋级真锚」。S4 影子对拍（A+B 合并 11 主题、220 篇语料）人工裁决的
+> 37 个候选中，**15 个真锚增益词**经 `learned_anchor_store` 从 pending 晋级为 accept（active）；
+> 其余 22 个由选种硬规则天然排除（reject，不灌库）。变动量 10–30%，bump 第三位 → v2.3.1。
+
+### ① learned 锚点层晋级（`core/learned_anchor_store.py`，mod-v1.0.0，S4 已建）
+- **新增 `scripts/promote_s5.py`（mod-v1.0.0）**：固化 15 个 accept 词及完整证据字段
+  （topic_cross / coverage / doc_hits / consensus_doc_hits / freq / pos / basis_version=v2.3.1），
+  幂等 `upsert_pending` + `set_decision("accept")`；accept 名单运行时子串自检（冲突退出码 2）。
+- **15 个 accept 真锚**：低空经济、能量密度、动力电池、规划产能、知识产权、固态电池、数据中心、
+  具身智能、技术壁垒、地缘政治、加征关税、供需缺口、价格中枢、能源转型、现货价格。
+- 真实运行时库 `/root/.infoseek/learned_anchors.json` 首次创建：15 accept / 0 pending / 0 冲突
+  （运行时数据，不进 GitHub 仓库）。
+
+### ② 主链显式开关接线（`scripts/infoseek_zerodep_nlp.py`，mod-v1.2.0）
+- **新增统一访问协议 `_active_zh_anchors()`**：函数内双路惰性导入（无顶层 import），
+  仅当环境变量 `INFOSEEK_LEARNED_ANCHORS` 为真时读取 accept 词，与基线 `_ZH_HIGH_FREQ`
+  **并集叠加（非替换）**；默认 OFF、store 缺失/损坏/为空时逐字节回退基线。
+- 两个切词消费点统一改调该协议；默认行为零变化。
+
+### ③ 守护与回归
+- **新增 `tests/test_learned_anchor_s5.py`（31 断言）**：名单固化（15/22、不相交、无子串）、
+  晋级落库（15 accept、证据字段、basis_version、decided_at）、幂等、reject 不入库、
+  主链端到端（OFF 回退 / ON 叠加含基线 / 抽取命中）。
+- **演进 `tests/test_learned_anchor_s4.py`** F7 契约：从「主链零接线」改为「主链定义存在 +
+  无顶层 import learned_anchor_store + 默认 OFF 逐字节回退」（29 断言）。
+
+## [2.3.0] - 2026-09-29（中文 NLP 依赖收口：6→10 处裸 import 单源化 + zerodep 高频词典与共识强化）
+
+> 触发：用户指令 2026-09-29「把 6 处裸 import 收敛到 core/jieba_bridge.py，统一探测/初始化/降级；
+> 增强 infoseek_zerodep_nlp.py（内置小型高频词典 + 共识投票强化）」。审计实测裸 import 为 **10 处**
+> （6 处直接命中 + anchor_adapter×2 / summarize_adapter×2 两处首轮 grep 漏检），全部收敛。
+
+### ① 裸 import 单源化（10 处 → 1 个 bridge）
+- **新增唯一真源** `core/jieba_bridge.py`（mod-v1.0.0）：统一探测 jieba / jieba.dt / jieba.posseg /
+  jieba.analyse / pypinyin，按需 `jieba.dt.initialize`（进程内一次），缺失一次性告警，降级永不抛错。
+- **收敛点**：
+  - `scripts/text_tokenizer.py`（mod-v1.1.0）：删除 `_JIEBA/_JIEBA_PROBED/_FALLBACK_WARNED` 三套状态，委托 bridge；
+  - `core/person_ner.py`：pypinyin + jieba.dt 两套探测状态删除，`_probe_pypinyin/_freq_common` 改薄委托；
+  - `core/entity_aliases.py`：jieba.posseg 原在热路径每次 try-import → bridge 缓存（消除热路径 import）；
+  - `core/entity_profile.py`：jieba 每次 `_extract_topics` try-import → bridge；
+  - `scripts/infoseek_zerodep_nlp.py`：jieba.analyse 裸 import → bridge；
+  - `scripts/anchor_adapter.py`：jieba.analyse ×2 处 → bridge；
+  - `scripts/summarize_adapter.py`：jieba / jieba.analyse ×2 处 → bridge。
+- **双模块状态分裂防护**：bridge 尾部 `sys.modules` 双向登记（顶层 `jieba_bridge` ↔ `core.jieba_bridge`
+  为同一对象），同 capability_registry 模式。
+- **mock 晚绑定契约**：消费方保持模块对象 + 属性访问（禁 from-import bridge），patch 在消费点实测生效。
+
+### ② infoseek_zerodep_nlp.py 增强（mod-v1.1.0）
+- **内置小型高频词典**：≈250 中文（AI/金融/医疗/能源/消费五域）+ 40 英文领域词；新增「词典匹配估计器 D」，
+  解决 n-gram 对**只出现 1 次的专业词/词表输入**全盲的长尾召回缺口。
+- **锚点掩码切分**：命中词典词替换为全角空格，使 n-gram 不跨锚点成串——根治「人工智能大模型」滑出
+  「智能大模/能大模型」等跨词噪声；统计估计器吃掩码文本，残片按停用字切「实义片段」互证。
+- **共识投票强化**：新增 `weighted_consensus`（统计估计器等权、词典锚点分层），阈值自适应
+  （≥3 估计器要求 2 票，2 估计器要求两侧互证）；主入口改「分层合成」——词典锚点命中即高置信、
+  统计共识补词表外词、单票噪声丢弃、全空兜底收紧降权；置信分统一 (0,3] 分层。`redundant_consensus` 保留兼容。
+
+### 守护与回归
+- 新增 `tests/test_jieba_bridge_zerodep_v230.py`（**26 断言**：单源/双模块/能力契约/mock 晚绑定/锚点召回/掩码去噪/加权投票）；
+  更新 `test_ga5_tokenizer_v184.py`（回退路径改 mock bridge.lcut）、`test_ga9_person_v190.py` A8（改 mock bridge.get_pypinyin）。
+- 全量回归 `python tests/run_tests.py`：**78 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT ALL GREEN**（78 套件）。
+
+## [2.2.0-openfix-g7g8] - 2026-09-21（Phase-BH 转入批：G7 文档/基线口径治理 + G8 入口类型契约设计，**版本号不变**）
+
+> 触发：Phase-BH（模块边界能力硬化 G1–G6）「转入下批登记」的 G7/G8。G7 为文档/基线口径陈旧项
+> 治理（以代码/实测为唯一真源）；G8 为公共入口 None/类型契约统一（架构级，本批仅交付专项设计切片，
+> 零入口改动）。两者均零代码逻辑破坏、零公开签名改动，对外版本维持 **2.2.0**。
+
+### G7 · 文档/基线口径治理
+- **套件数口径**：`SKILL.md §10` 25→**76 标准套件**、测试文件 76→**77**；`README` 测试套件数 62→**77**；
+  `tests/run_tests.py` docstring 73→**76**。
+- **MCP 工具面口径统一**：`SKILL.md` L71/L293「17」、`README`「19 工具」统一为 **18 规范工具 + 12 兼容并存**
+  （真源 `_CANONICAL_TOOL_NAMES` 18 项）；补齐 `references/Infoseek_MCP集成契约_v1.5.md` 工具面 13→18
+  （补 Key 管理 2 / QCM 协同 1 / 身份归因 1 / 账号取证 1）。
+- **悬空引用收敛**：`dist/quality_baseline.json`（文件从不存在）→ 实际产物 `dist/perf_baseline_v101.json`
+  （`README` 贡献节 + `references/risk-register.md` 监控计划两处）。
+- **其它**：`core/` 功能模块数 22→**29**。
+- **守护联动**：`tests/test_doc_state_sync_d6.py` 新增 ⑤ 组 E1-E4（套件数·文件数口径对齐 + 文档引用
+  `dist/*.json` 产物存在性），断言 25→**29**。
+
+### G8 · 公共入口类型契约（设计交付，零入口改动）
+- **重新探测复现**：23 样例边界注入 → **12 OK / 0 CONTROLLED / 11 CRASH**（吻合登记「11 处 CRASH」）；
+  11 处全为 `AttributeError`，含 2 处元素级违规（`[None]` 单坏源破链）。
+- **交付**：`references/g8-entry-contract-design.md`（三方案对比，推荐 C：守卫模块 + 渐进接线）+
+  `tests/test_entry_contract_g8.py`（14 断言契约基线）。**未改任何现有入口**，架构级改动留 G8-apply。
+
+### 守护与回归
+- 全量回归 `python tests/run_tests.py`：**76 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT ALL GREEN**（新增
+  `test_entry_contract_g8.py`）。
+- **长尾中文召回增强（P0 · 2026-09-29）**：`scripts/infoseek_pipeline.py` mod-v `1.2.0`→`1.2.1`（对外版本维持 2.2.0）；
+  ① 子查询拆解并行召回（`_decompose_longtail_cn` + `_fanout_recall`，`search_web` 全路径扇出）② CN-AI-Web 对 CJK 自动启用
+  （`_search_cn_web`/`_default_layer` 自判，不再依赖 `INFOSEEK_CN_AI_SEARCH`）③ relevance 二级保底送 top-k（`_filter_relevant` 末级）；
+  新增 `tests/test_p0_cn_longtail_v221.py`（12 断言）；D-6 白名单 + SKILL.md/README/ROADMAP 套件数 76→77 同步。
+
 ## [2.2.0] - 2026-09-19（GA11 事件槽批次阶段 1-3：三元事件身份 + 跨文本时间槽键 + LLM 路径收口）
 
 > 触发：v2.1.2 落地事件抽取（F-06）/ 期间裁决（F-04）/ time 路主体闸（F-07）后，跨文本对齐仍用

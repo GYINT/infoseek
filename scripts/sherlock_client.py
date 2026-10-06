@@ -33,7 +33,6 @@ import csv
 import io
 import logging
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +56,19 @@ except ImportError:
 
 CAP_NAME = "Sherlock"
 
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _core = str(__import__("pathlib").Path(__file__).resolve().parent.parent / "core")
+        if _core not in sys.path:
+            sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 # exists 列 → 是否纳入 + 置信度（仅 Claimed 为真实命中）
 _STATUS_MAP = {
     "Claimed": (True, 0.85),
@@ -73,7 +85,7 @@ def _resolve_cli() -> List[str]:
     返回命令片段（list），调用方以 cli + [username, ...] 拼接，
     兼容 Windows 控制台脚本（sherlock.exe）与模块式回退。
     """
-    cli = shutil.which("sherlock")
+    cli = _dep_reg().which_path("sherlock")
     if cli:
         return [cli]
     venv = os.environ.get("INFOSEEK_SHERLOCK_VENV")

@@ -35,9 +35,37 @@ capabilities:
     weight: 0.9
     cost_model: credits
     health_probe: engine_lifecycle
-    degrade_to: [Exa, Tavily]
+    degrade_to: [Exa, Tavily, manual_review]
     network_boundary: open
     requires_hosts: [qveris.ai, qveris.cn]
+
+  # G3（边界硬化）：Exa/Tavily 搜索替代层占位声明（消除 QVeris.degrade_to 悬空引用）
+  # 默认 OFF：未接 key，enabled=false；末端闭合到 manual_review 保证优雅降级。
+  - name: Exa
+    kind: search_api
+    enabled: false
+    requires_consent: false
+    auth_env: EXA_API_KEY
+    weight: 0.7
+    cost_model: credits
+    health_probe: engine_lifecycle
+    degrade_to: []
+    venv_hint: ""
+    network_boundary: open
+    requires_hosts: []
+
+  - name: Tavily
+    kind: search_api
+    enabled: false
+    requires_consent: false
+    auth_env: TAVILY_API_KEY
+    weight: 0.7
+    cost_model: credits
+    health_probe: engine_lifecycle
+    degrade_to: []
+    venv_hint: ""
+    network_boundary: open
+    requires_hosts: []
 
   - name: Maigret
     kind: identity_attribution
@@ -213,6 +241,14 @@ capabilities:
 # boundary_gate.restricted_report() / references/network-boundary-report.md 消费。
 # evidence 为历史实测摘要，目标机重跑 net_probe 可刷新形成「沙箱 vs 目标机」对照。
 network_boundaries:
+  - host: qveris.ai
+    boundary: open
+    evidence: "开放网络可达（QVeris 结构化数据 API 主端点）"
+    used_by: [QVeris]
+  - host: qveris.cn
+    boundary: open
+    evidence: "开放网络可达（QVeris CN 端点）"
+    used_by: [QVeris]
   - host: www.wikidata.org
     boundary: sandbox_restricted
     evidence: "DNS 可解析但返回污染 IP（103.102.166.224）；http 301 / https SSL 握手失败（2026-09 实测）"

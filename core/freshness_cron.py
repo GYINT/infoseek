@@ -26,6 +26,15 @@ CORE_DIR = Path(__file__).parent
 sys.path.insert(0, str(CORE_DIR))
 
 
+def _dep_reg():
+    """S7：外部依赖可用性统一经 dep_registry 事实层求值（懒加载，缺失回退）。"""
+    try:
+        import dep_registry as _dr
+    except ImportError:
+        from core import dep_registry as _dr  # type: ignore
+    return _dr
+
+
 class FreshnessCron:
     """v2.1.1 新鲜度扫描器"""
 
@@ -372,7 +381,14 @@ class FreshnessCron:
         }
 
     def start_scheduler(self, interval_days: Optional[int] = None):
-        """启动后台调度器（间隔天数扫描一次）"""
+        """启动后台调度器（间隔天数扫描一次）。
+
+        S7：schedule 为可选外部依赖，可用性经 dep_registry 统一求值；
+        缺失时给出明确安装指引（避免裸 import 报模糊 ModuleNotFoundError）。
+        """
+        dr = _dep_reg()
+        if not dr.is_available("schedule"):
+            dr.require("schedule")  # 抛带 install_hint 的依赖缺失错误
         import schedule
         interval = interval_days or self.interval_days
 

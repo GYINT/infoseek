@@ -1658,7 +1658,9 @@ async def score_contradiction_async(claim_a: Dict, claim_b: Dict, llm_router=Non
     import asyncio
     if llm_router:
         return await score_with_llm_async(claim_a, claim_b, llm_router=llm_router)
-    return await asyncio.to_thread(score_contradiction, claim_a, claim_b)
+    # v2.8.0：无 router 分支也走结构化槽 hybrid（env INFOSEEK_CONTRADICTION_LLM
+    # 开启时经同步 llm_call 抽槽，整体 to_thread 包裹避免阻塞事件循环）
+    return await asyncio.to_thread(score_contradiction_hybrid, claim_a, claim_b)
 
 
 async def score_with_llm_async(claim_a: Dict, claim_b: Dict, llm_router=None) -> Dict:

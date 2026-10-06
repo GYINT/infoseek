@@ -25,6 +25,15 @@ CORE_DIR = Path(__file__).parent
 sys.path.insert(0, str(CORE_DIR))
 
 
+def _dep_reg():
+    """S7：外部依赖可用性统一经 dep_registry 事实层求值（懒加载，缺失回退）。"""
+    try:
+        import dep_registry as _dr
+    except ImportError:
+        from core import dep_registry as _dr  # type: ignore
+    return _dr
+
+
 # Wikidata QID 映射
 WIKIDATA_CATEGORIES = {
     'AI_COMPANY': 'Q891723',          # AI company
@@ -124,8 +133,10 @@ class WikidataSync:
         httpx 未装或初始化失败时降级到 asyncio.to_thread（兼容旧路径）。
         """
         import asyncio
-        # v2.5.1: 尝试 httpx 真异步
+        # v2.5.1: 尝试 httpx 真异步；S7：可用性经 dep_registry 统一求值
         try:
+            if not _dep_reg().is_available("httpx"):
+                raise ImportError
             import httpx
             if not hasattr(self, '_httpx_client') or self._httpx_client is None:
                 self._httpx_client = httpx.AsyncClient(timeout=self.timeout)

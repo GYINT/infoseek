@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Infoseek 合规审计自动化（D-8 / P3-9 立项落地，v2.2.0 新增）
+"""Infoseek 合规审计自动化（D-8 / P3-9 立项落地，mod-v2.6.0）
 
 四链合一自动化审计报告（P3-9 定义：抓取合规 / 版权 / 凭证审计的自动化报告）：
   ① 凭证链      复用 scripts/leak_scan.py（密钥字面量扫描）+ core/key_manager.py（脱敏状态）
@@ -27,7 +27,12 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-AUDIT_VERSION = '2.2.0'
+# AUDIT_VERSION 动态引用唯一真源（2026-09-29：原写死 '2.2.0'，每次升版漂移）
+sys.path.insert(0, str(ROOT / 'scripts'))
+try:
+    from mcp_tools_common import SKILL_VERSION as AUDIT_VERSION
+except Exception:
+    AUDIT_VERSION = '2.3.0'
 DEFAULT_REPORT_REL = 'references/compliance-audit-report.md'
 DEFAULT_JSON_REL = 'references/compliance-audit-report.json'
 NETWORK_REPORT_REL = 'references/network-boundary-report.md'

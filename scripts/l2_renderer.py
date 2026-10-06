@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/l2_renderer.py — L2 多引擎渲染抽象层（v1.4.2 · 功能层）
+scripts/l2_renderer.py — L2 多引擎渲染抽象层（v1.5.0 · 功能层 · S6 探测收口）
 
 把 infoseek 的 L2 抓取（浏览器渲染）从"单 playwright 依赖"升级为
 "多引擎注册表 + 场景路由 + 健康状态机 + 故障 cross-over"：
@@ -62,9 +62,21 @@ SCENE_BATCH = "batch"       # 批量并行：Obscura 优先
 SCENE_LAST = "last"         # 终极兜底
 
 
-def _shutil_which(name: str) -> Optional[str]:
-    import shutil
-    return shutil.which(name)
+# ── S6：dep_registry 事实层惰性 accessor（收口浏览器探测原语，零漂移）──
+# 统一以顶层名 dep_registry 导入（scripts 把 core/ 注入 sys.path）；
+# dep_registry 加载时已做 sys.modules 双登记，顶层名 ↔ core.dep_registry 合一。
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _cand = Path(__file__).resolve().parent.parent / "core"
+        if str(_cand) not in sys.path:
+            sys.path.insert(0, str(_cand))
+        import dep_registry as _mod  # 顶层名
+        _dr = _mod
+    return _dr
 
 
 def _tcp_probe(port: int, host: str = "127.0.0.1", timeout: float = 1.5) -> bool:
@@ -80,12 +92,16 @@ def _tcp_probe(port: int, host: str = "127.0.0.1", timeout: float = 1.5) -> bool
 # ── 引擎探测（懒加载，缺失自动跳过）──
 
 def _probe_camoufox() -> bool:
-    try:
-        import camoufox  # noqa: F401
-    except Exception:
+    # S6 收口：import + official 目录非空（probe_mode=all），事实原语走 dep_registry
+    dr = _dep_reg()
+    if not dr.has_module("camoufox"):
         return False
     # 浏览器二进制必须真实存在（fetch 后落 ~/.cache/camoufox/browsers/official/<ver>/）
     # 注意：pip CLI(camoufox) 存在≠浏览器已装，禁止用 which 兜底（误判 P5）
+    return dr.probe_token("path:~/.cache/camoufox/browsers/official") and _camoufox_dir_nonempty()
+
+
+def _camoufox_dir_nonempty() -> bool:
     base = Path.home().joinpath(".cache/camoufox/browsers/official")
     try:
         return base.is_dir() and any(base.iterdir())
@@ -93,17 +109,16 @@ def _probe_camoufox() -> bool:
         return False
 
 
-
 def _probe_obscura() -> bool:
-    if _shutil_which("obscura"):
+    # which 走 dep_registry；运行期 CDP 端口探测（registry 未含）保留在消费层
+    if _dep_reg().which_path("obscura"):
         return True
     return _tcp_probe(OBSCURA_PORT)  # CDP 服务已在跑
 
 
 def _probe_patchright() -> bool:
-    try:
-        import patchright  # noqa: F401
-    except Exception:
+    dr = _dep_reg()
+    if not dr.has_module("patchright"):
         return False
     # patchright 价值=自家源码级反检测补丁浏览器（install 后落 ms-playwright 缓存）。
     # 复用系统 chromium 时 patchright 退化为裸奔（无 stealth），probe=False 让位 chromium 引擎
@@ -111,14 +126,18 @@ def _probe_patchright() -> bool:
     return _has_playwright_browser()
 
 
-
 def _find_system_chromium() -> Optional[str]:
-    """探测可用 chromium 二进制：CHROMIUM_PATH env → which → Debian/Ubuntu 默认路径。"""
-    cand = os.environ.get("CHROMIUM_PATH", "").strip()
-    if cand and os.path.isfile(cand):
-        return cand
+    """探测可用 chromium 二进制：CHROMIUM_PATH env → which → Debian/Ubuntu 默认路径。
+
+    S6：env/which 事实原语走 dep_registry；路径返回（供 _launch_opts 消费）保留本层。
+    """
+    dr = _dep_reg()
+    if dr.probe_token("env:CHROMIUM_PATH"):
+        cand = os.environ.get("CHROMIUM_PATH", "").strip()
+        if cand and os.path.isfile(cand):
+            return cand
     for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable"):
-        p = _shutil_which(name)
+        p = dr.which_path(name)
         if p:
             return p
     for p in ("/usr/lib/chromium/chromium", "/usr/bin/chromium",
@@ -142,9 +161,8 @@ def _has_playwright_browser() -> bool:
 
 
 def _probe_chromium() -> bool:
-    try:
-        from playwright.sync_api import sync_playwright  # noqa: F401
-    except Exception:
+    # playwright 可 import 的事实走 dep_registry；浏览器（系统路径/缓存）组合保留本层
+    if not _dep_reg().has_module("playwright.sync_api"):
         return False
     return bool(_find_system_chromium()) or _has_playwright_browser()
 
@@ -179,7 +197,7 @@ def _render_obscura(url: str, timeout: float = DEFAULT_TIMEOUT) -> str:
         # 兜底：obscura CLI 启动临时实例
         import subprocess
         proc = subprocess.Popen(
-            [_shutil_which("obscura"), "serve", "--port", str(OBSCURA_PORT), "--stealth"],
+            [_dep_reg().which_path("obscura"), "serve", "--port", str(OBSCURA_PORT), "--stealth"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             time.sleep(2.0)

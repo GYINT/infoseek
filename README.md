@@ -1,9 +1,9 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v2.2.0 发布版**。
+> 端到端内容智能采集与调研工作流。**v2.6.0 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-2.2.0-blue)](#)
+[![Version](https://img.shields.io/badge/version-2.6.0-blue)](#)
 [![Tests](https://img.shields.io/badge/tests-67%20suites%20green-success)](#)
 [![MCP](https://img.shields.io/badge/MCP-19%20tools-blueviolet)](#)
 
@@ -22,7 +22,7 @@ async for partial in streaming_research("GPT-5", sources, lite=True):
 ```
 
 ```bash
-# MCP server（19 工具，见下文「MCP 工具清单」）
+# MCP server（18 规范工具 + 12 兼容并存，见下文「MCP 工具面」）
 python scripts/infoseek_mcp_server.py
 ```
 
@@ -115,32 +115,32 @@ r = score_source({"url": "...", "title": "...", "snippet": "..."}, "GPT-5")
 
 > 💡 Windows 环境请将 `command` 改为 `python3` + `args: ["脚本路径", "--transport", "stdio"]`。
 
-**MCP 工具清单（v2.1.0 = 19 个）**：
+**MCP 工具面（v2.2.0 = 18 规范工具 + 12 兼容并存）**：
 
-| # | 工具 | 用途 |
+| # | 规范工具 | 用途 |
 |---|------|------|
-| 1 | `search_anchors` | 锚点发现（返回候选渠道/锚点框架，非直接搜索） |
-| 2 | `fetch_content` | 4 级降级抓取正文 |
-| 3 | `save_archive` | 调研产物归档 |
-| 4 | `check_dedup` | 去重校验 |
-| 5 | `dedup_stats` | 去重统计 |
-| 6 | `fuse_analysis` | 跨源融合分析 |
-| 7 | `cross_subject_analysis` | 跨主题分析 |
-| 8 | `summarize_content` | 内容摘要 |
-| 9 | `conflict_detection` | 实体感知冲突检测（v3） |
-| 10 | `score_source` | 单源四维评分（唯一聚合口径） |
-| 11 | `score_contradiction` | 声明对矛盾评分（键控槽 + 时间槽 + 否定路） |
-| 12 | `research` | 端到端同步调研（兼容入口） |
-| 13 | `research_v3` | 研究主入口（v3） |
-| 14 | `research_stream` | 流式研究（多步 progress 推送） |
-| 15 | `manage_keys` | Key 管理（list/stat/rotate/revoke，脱敏） |
-| 16 | `key_usage` | Key 用量成本报表 |
-| 17 | `qcm_query` | 反向调用 QCM 归零质量管理框架 |
-| 18 | `identity_attribution` | OSINT 用户名→跨平台身份归因（默认 OFF + consent） |
-| 19 | `account_forensics` | 账号可信度取证（FakeDetect，默认 OFF + consent） |
+| 1 | `search_anchors_async` | 锚点发现（真实多引擎搜索） |
+| 2 | `fetch_content_async` | 4 级降级抓取正文 |
+| 3 | `save_archive_async` | 调研产物归档 |
+| 4 | `check_dedup_async` | 去重校验 |
+| 5 | `dedup_stats_async` | 去重统计 |
+| 6 | `fuse_analysis_async` | 跨源融合分析 |
+| 7 | `cross_subject_analysis_async` | 跨主题分析 |
+| 8 | `summarize_content_async` | 内容摘要 |
+| 9 | `conflict_detection_async` | 实体感知冲突检测（v3） |
+| 10 | `score_source_async` | 单源四维评分（唯一聚合口径） |
+| 11 | `score_contradiction_async` | 声明对矛盾评分（键控槽 + 时间槽 + 否定路） |
+| 12 | `research_v3` | 研究主入口 |
+| 13 | `research_stream` | 流式研究（多步 progress 推送） |
+| 14 | `manage_keys` | Key 管理（list/stat/rotate/revoke，脱敏） |
+| 15 | `key_usage` | Key 用量成本报表 |
+| 16 | `qcm_query` | 反向调用 QCM 归零质量管理框架 |
+| 17 | `identity_attribution` | OSINT 用户名→跨平台身份归因（默认 OFF + consent） |
+| 18 | `account_forensics` | 账号可信度取证（FakeDetect，默认 OFF + consent） |
 
-> 工具定义真源：`scripts/infoseek_mcp_server.py` 的 `TOOLS` 列表。异步包装
-> （`*_async`）在库 API 层提供，MCP 面收敛为上述 19 个；`research` 同步入口保留兼容。
+> 工具定义真源：`scripts/infoseek_mcp_server.py` 的 `_CANONICAL_TOOL_NAMES`（**18 项**）。
+> 12 个 v1.x 同步名（`search_anchors` / `fetch_content` / … / `research`）为**兼容并存期**，
+> 结果附 `deprecated: true` + `migrate_to`，计划 v4.0.0 冻结。
 
 ---
 
@@ -232,7 +232,7 @@ r = score_source({"url": "...", "title": "...", "snippet": "..."}, "GPT-5")
 | [references/api-keys.md](references/api-keys.md) | 外部 API Key 清单 + 效益 + 获取 |
 | [references/ROADMAP.md](references/ROADMAP.md) | 当前基线 · 待办 · 前景方向（纯净版） |
 | references/ROADMAP_archive_20260917.md | v1.0.0→v2.0.0 历史实施记录归档 |
-| [tests/](tests/) | 测试套件（62 个 `test_*.py`，统一入口 `run_all.py`；`run_tests.py` 为旧聚合器） |
+| [tests/](tests/) | 测试套件（85 个 `test_*.py`；标准聚合入口 `run_tests.py`，并发全量 `run_all.py`） |
 
 > ℹ️ **冷启动说明**：运行时状态（`claims.json`、`entity_aliases.json`、`pending_entities.json`、`anchor_db.json`、`engine_state.json` 等）首跑为空占位，运行后随调研逐步积累。这些文件**不写入技能源码目录**，落在运行时数据目录（默认 `~/.infoseek/`，可用 `INFOSEEK_DATA_DIR` 覆盖），技能更新不丢数据。详见 `core/state_dir.py`。
 
@@ -242,7 +242,8 @@ r = score_source({"url": "...", "title": "...", "snippet": "..."}, "GPT-5")
 
 | 版本 | 状态 | 备注 |
 |------|------|------|
-| v2.1.0 | 🟢 **当前发布版** | OSINT 双客户端真实 CLI 契约修复 + 双源聚合 + consent 授权 CLI |
+| v2.2.0 | 🟢 **当前发布版** | GA11 三元事件身份 + 跨文本时间槽键 + LLM 路径收口；HF 人因指纹增强；G7/G8 文档口径与入口类型契约 |
+| v2.1.0 | ✅ 历史 | OSINT 双客户端真实 CLI 契约修复 + 双源聚合 + consent 授权 CLI |
 | v2.0.0 | ✅ 历史 | GA11 键控事实槽矛盾检测 + GA12 网络边界门控；DSH 插件 manifest |
 | v1.9.0 | ✅ 历史 | GA9 人名消歧五步 + GA10 跨语言别名桥接 |
 | v1.8.x | ✅ 历史 | 版本单源化 / 回归 runner / 评分三链路口径统一 / 分词单源化 |
@@ -255,19 +256,19 @@ r = score_source({"url": "...", "title": "...", "snippet": "..."}, "GPT-5")
 ## 测试
 
 > 测试为「脚本风格」（顶层直接执行），**不要用 pytest 直接收集**（会因 SystemExit 崩溃）。
-> 统一入口：**`python tests/run_all.py`**。当前 **62 个 `test_*.py` 套件**，绿基线判据
+> 标准入口：**`python tests/run_tests.py`**（86 标准套件）。当前共 **87 个 `test_*.py`**，绿基线判据
 > = 0 FAIL + 0 TIMEOUT；SKIP 单列（可选依赖缺失，不污染基线）。
 
 ```bash
-python tests/run_all.py                 # 全量回归（统一超时/隔离 env/JSON 落盘）
-python tests/run_all.py --timeout 300   # 放宽每套件超时
+python tests/run_tests.py               # 标准回归（77 套件，唯一验收入口）
+python tests/run_all.py --timeout 300   # 并发全量（放宽每套件超时）
 python tests/test_three_chain_v183.py   # 单套件直跑
 ```
 
-- **run_all.py（推荐）**：统一发现、隔离搜索 env（`INFOSEEK_PLATFORM_WEBSEARCH=off`）、
-  per-suite 超时、PASS/FAIL/SKIP 三态严格归类、结果 JSON 落盘。
-- **run_tests.py（旧聚合器，保留）**：逐子进程直跑的轻量入口；v2.1.0 已修正其
-  SKIP 判定（旧逻辑 returncode==0 先短路吞掉自报 SKIP、且只看 stdout）。
+- **run_tests.py（标准聚合入口 · 推荐）**：逐子进程直跑，排除深度测试 `test_deep_v101.py` → **86 标准套件**；
+  v2.1.0 已修正 SKIP 判定（旧逻辑 returncode==0 先短路吞掉自报 SKIP、且只看 stdout）。
+- **run_all.py（并发全量）**：4 并发统一发现**全部** `test_*.py`、隔离搜索 env
+  （`INFOSEEK_PLATFORM_WEBSEARCH=off`）、per-suite 超时、PASS/FAIL/SKIP 三态严格归类、结果 JSON 落盘。
 - **SKIP / 可选依赖**：jieba / pypinyin 等可选依赖缺失时，相关套件自报
   `0 PASS / N SKIP` 并 `exit 0`，run_all 归类 SKIP；装齐依赖后自动恢复为全断言运行。
 - **性能套件**：`test_perf_v101.py` 为独立观测（LRU 缓存基线），在 SLOW_SUITES 中给独立超时。
@@ -294,7 +295,7 @@ infoseek/
 │   └── state_dir.py
 ├── scripts/            # 适配层 + MCP server
 │   ├── infoseek_core_v2.py       # 核心 API（research/async/streaming/score/conflict）
-│   ├── infoseek_mcp_server.py    # MCP server 门面（19 工具）
+│   ├── infoseek_mcp_server.py    # MCP server 门面（18 规范工具 + 12 兼容并存）
 │   ├── mcp_tools_*.py            # 工具模块（search/archive/analysis/keys/async/common/qcm）
 │   ├── domain_router.py          # 5 领域路由（词边界匹配 + 多域交集）
 │   ├── domain_orchestrator.py    # 领域调度 + 按域模板渲染 + 过滤清单
@@ -303,11 +304,12 @@ infoseek/
 │   ├── infoseek_consent_cli.py   # v2.1.0 能力授权 CLI（list/grant/revoke/doctor）
 │   └── ...
 ├── references/         # 契约 + 配置（keyword.yaml / contradiction-synonyms.json）+ 依赖/Key/路线图
+├── deps/               # 外部依赖注册表（registry.yaml，S1 建表零回归）
 ├── domains/            # 领域配置（tech/market/finance/policy/competitor）
 │   ├── *.yaml          # 领域 profile（Markdown 文本，raw 读取）
 │   └── templates.yaml  # 报告模板（v3.2.0，含跨源综合段 + 空源守卫）
-├── tests/              # 62 个测试套件（run_all.py 统一入口）
-└── dist/               # 质量基线 + perf 基准 + 生态构建产物
+├── tests/              # 87 个测试文件（run_all.py 全发现；run_tests.py → 86 标准套件）
+└── dist/               # perf 基准（perf_baseline_v101 / perf_profile_v101）+ 生态构建产物
 ```
 
 ---
@@ -315,10 +317,10 @@ infoseek/
 ## 贡献与反馈
 
 - **Bug 报告**：附 `infoseek --version` + 最小复现
-- **性能问题**：附 `dist/quality_baseline.json` 对比
+- **性能问题**：附 `dist/perf_baseline_v101.json` 对比
 - **功能请求**：附用例 + 期望输出
 - **路线图**：见 `references/ROADMAP.md`
 
 ---
 
-> v2.1.0 | OSINT 双源聚合 + 键控/时间事实槽矛盾检测 + 四维锚点评分 + 按域报告 | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License
+> v2.2.0 | 三元事件身份 + 键控/时间事实槽矛盾检测 + 四维锚点评分 + 人因指纹增强（HF） | 多生态（ima/Claude/Codex/Dify/Coze）| MIT License

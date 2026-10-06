@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-infoseek_pipeline.py — 锚点→采集→聚合 全链路调度器 (v1.2.0)
+infoseek_pipeline.py — 锚点→采集→聚合 全链路调度器 (mod-v1.5.0)
 
 从 infos 锚点清单出发，经 anchor_adapter 转换为 seek 意图卡片，
 依次执行：输入契约验证 → URL预检 → 三级降级提取 → 治理反馈 → 输出聚合。
@@ -73,6 +73,9 @@ import re as _re
 
 _UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
        '(KHTML, like Gecko) Chrome/124.0 Safari/537.36')
+
+# 渲染钩子：测试可 monkey-patch 为 fn(url, timeout)->html；None=真实走 l2_renderer
+_RENDER_HOOK = None
 
 
 def _http_get(url: str, timeout: int = 3) -> bytes:
@@ -311,46 +314,252 @@ def _search_metaso(query: str, max_results: int = 5) -> list:
     return out
 
 
-def _search_cn_web(query: str, max_results: int = 5) -> list:
-    """国内网页 AI 搜索最终兜底（opt-in，v1.1.0；非官方端点）。
+def _render_html(url: str, timeout: float) -> str:
+    """L2 渲染抓取（JS 前端交互页兜底）。
 
-    `INFOSEEK_CN_AI_SEARCH=1` 启用。针对 360AI搜 / Kimi探索版 / 天工 等
-    无公开 API 的网页产品，请求其搜索页并通用解析（title/description/链接）。
-
-    如实声明：端点为准官方/网页接口，**可能失效**，发布前需逐产品核验维护；
-    任何失败自动降级（不影响主链）。默认关闭。
+    优先走可注入的测试钩子 `_RENDER_HOOK`（monkey-patch 用），否则惰性复用
+    `l2_renderer.render_html`（真实浏览器渲染，单引擎失败自动降级、全失败返回 ""）。
+    渲染器不可用（playwright/浏览器缺失）/ 超时 / 异常 → 返回空串，由上层降级。
     """
-    if os.environ.get('INFOSEEK_CN_AI_SEARCH') != '1':
-        return []
-    import urllib.parse
+    if _RENDER_HOOK is not None:
+        try:
+            _r = _RENDER_HOOK(url, timeout)
+            if isinstance(_r, bytes):
+                _r = _r.decode('utf-8', errors='ignore')
+            return _r or ""
+        except Exception as _e:
+            log.info(f"[CN-AI-Web] 渲染钩子异常，降级静态: {type(_e).__name__}")
+            return ""
+    try:
+        import l2_renderer as _l2
+        _r = _l2.render_html(url, timeout=timeout)
+        if isinstance(_r, bytes):
+            _r = _r.decode('utf-8', errors='ignore')
+        return _r or ""
+    except Exception as _e:  # 渲染层任何故障都不得影响主链
+        log.info(f"[CN-AI-Web] 渲染降级（{url}）: {type(_e).__name__}")
+        return ""
+
+
+def _extract_page_text(html: str):
+    """从渲染/静态 HTML 通用抽取 (title, description, text)，纯标准库 best-effort。"""
     import re as _re
+    title = desc = ""
+    m = _re.search(r'<title[^>]*>(.*?)</title>', html, _re.S | _re.I)
+    if m:
+        title = _re.sub(r'<[^>]+>', '', m.group(1)).strip()
+    m = _re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']',
+                   html, _re.S | _re.I)
+    if m:
+        desc = _re.sub(r'<[^>]+>', '', m.group(1)).strip()
+    body = _re.sub(r'(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>', ' ', html)
+    text = _re.sub(r'<[^>]+>', ' ', body)
+    text = _re.sub(r'&(nbsp|amp|quot|#39|lt|gt);', ' ', text)
+    text = _re.sub(r'\s+', ' ', text).strip()
+    return title[:80], desc[:200], text
+
+
+_CN_CAPTCHA_MARKERS = (
+    "验证码", "滑块", "拼图", "访问异常", "安全验证", "请输入验证码",
+    "网络或服务器异常",
+)
+_CN_LOGIN_MARKERS = ("请登录", "扫码登录", "登录后查看", "登录后使用")
+# 品牌首页/落地页壳标题信号：含这些词且正文无结果语义的 JS 壳不能当搜索结果。
+# 通用首页词（正文须也短）；品牌专属营销词本身即强壳信号（正文可较长）。
+_CN_THIN_TITLE_MARKERS = ("官网", "官方网站", "首页")
+_CN_BRAND_HOME_MARKERS = ("智能体先行者", "先行者")
+# 真实搜索结果页的结构语义：命中其一即不应判首页薄壳（防误杀）。
+_CN_RESULT_LIST_MARKERS = (
+    "相关搜索", "搜索结果", "为您推荐", "相关推荐", "大家还在搜",
+    "查看更多", "加载更多", "下一页", "上一页", "共找到", "条结果",
+)
+
+
+def _is_thin_home(title: str, desc: str, text: str, query: str = "") -> bool:
+    """判定「品牌官网首页/落地页壳」而非真实搜索结果页（渲染后最终判定）。
+
+    分层语义：captcha/login 静态即可定（浏览器穿不透）；thin_home 必须在
+    渲染尝试之后才判——静态短正文可能只是 JS 未渲染，先给渲染兜底机会，
+    渲染完仍是官网营销壳才标记。防误杀三重门：
+      1) title/desc 回显查询词 → 结果页语义，不判；
+      2) 正文含搜索结果列表结构信号 → 不判；
+      3) 标题须命中首页/官网/品牌落地词，且正文无实质结果。
+    """
+    t = (title or "").strip()
+    if not t:
+        return False
+    # 门1：查询词回显 → 视为结果页
+    if query and _query_echoed(query, title, desc):
+        return False
+    blob = f"{title} {desc} {text[:600]}"
+    # 门2：真实结果列表结构
+    if any(m in blob for m in _CN_RESULT_LIST_MARKERS):
+        return False
+    # 品牌专属强壳词：标题命中即判（正文为通用营销文案，可较长）
+    if any(m in t for m in _CN_BRAND_HOME_MARKERS):
+        return True
+    # 通用首页/官网词：标题命中 + 正文短（<600，无实质结果）才判
+    if any(m in t for m in _CN_THIN_TITLE_MARKERS) and len(text or "") < 600:
+        return True
+    return False
+
+
+def _detect_cn_block(title: str, desc: str, text: str, *,
+                     query: str = "", allow_thin: bool = False) -> str:
+    """识别准官方端点的「非真实结果」页：验证码/登录墙/首页薄壳。
+
+    返回原因串（""/"captcha"/"login"/"thin_home"）。空串 = 视为可解析的结果页。
+    数据中心 IP 实测：360 强制滑块、Kimi 探索版需登录、天工跳首页——
+    这类页面不能静默当有效结果灌给主链，须显式降级标记交人工核验。
+
+    allow_thin=False（静态阶段默认）：只判 captcha/login，thin_home 延后，
+    避免静态短正文被定死而短路 L2 渲染兜底；渲染结束后用 allow_thin=True
+    对最终页补判首页壳。
+    """
+    blob = f"{title} {desc} {text[:400]}"
+    if any(m in blob for m in _CN_CAPTCHA_MARKERS):
+        return "captcha"
+    if any(m in blob for m in _CN_LOGIN_MARKERS):
+        return "login"
+    if allow_thin and _is_thin_home(title, desc, text, query):
+        return "thin_home"
+    return ""
+
+
+def _query_echoed(query: str, title: str, desc: str) -> bool:
+    """静态页 title/desc 是否回显了查询词（结果页语义信号）。
+
+    中文查询：整体或去标点后的主体出现在 title+desc 即视为命中；
+    英文/多词查询：任一长度≥3 的 token 命中即算。用于区分「真实结果页」
+    与「品牌首页薄壳」——前者不渲染，后者才渲染。
+    """
+    q = (query or "").strip()
+    if not q:
+        return False
+    blob = f"{title} {desc}"
+    if q in blob:
+        return True
+    # 英文/空格分词
+    for tok in q.split():
+        if len(tok) >= 3 and tok in blob:
+            return True
+    return False
+
+
+def _fetch_one_cn_endpoint(url: str, name: str, query: str = "", *,
+                           static_timeout: float = 10.0,
+                           render_timeout: float = 20.0):
+    """单端点四层分层抓取：静态 → 渲染 → 结构化解析（→ 人工标记由调用方加）。
+
+    返回 (item | None, via)：
+      - 静态 HTML 含有效 title/description/正文 → 直接解析（via="static"）；
+      - 静态内容过短/无正文（JS 交互页常见）→ L2 渲染后解析（via="render"）；
+      - 渲染也拿不到正文 → 回退静态 title/desc（via="static"）；
+      - 均失败 → (None, "none")。
+    """
+    html = _http_get(url, timeout=static_timeout).decode('utf-8', errors='ignore')
+    via = "static"
+    st_title, st_desc, st_text = _extract_page_text(html)
+    # 静态阶段只定 captcha/login（浏览器穿不透，渲染无意义）；thin_home 延后，
+    # 否则静态短正文会被定死而短路下面的 L2 渲染兜底。
+    block = _detect_cn_block(st_title or "", st_desc or "", st_text, query=query)
+    # 仅当静态页是「JS 薄壳」才启动 L2 渲染：无实质正文，且 title/desc
+    # 未回显查询词（即没有结果页语义，典型品牌首页/登录工作台壳）。
+    # 验证码/登录墙（block）不渲染——浏览器实测穿不透滑块，渲染只拖慢并覆盖。
+    # title/desc 已回显查询词的结果页即使正文短也直接采用，避免无谓开销与
+    # 「渲染真实网络覆盖有效静态结果」。
+    _echoed = _query_echoed(query, st_title, st_desc)
+    _is_thin = len(st_text) < 120 and not _echoed
+    if _is_thin and not block and _env_flag('INFOSEEK_CN_AI_RENDER', True):
+        rhtml = _render_html(url, render_timeout)
+        if rhtml:
+            r_title, r_desc, r_text = _extract_page_text(rhtml)
+            r_block = _detect_cn_block(r_title or "", r_desc or "", r_text, query=query)
+            # 渲染内容更长才替换；渲染页命中验证码/登录则把降级原因带出
+            if len(r_text) > len(st_text):
+                st_title, st_desc, st_text = r_title or st_title, r_desc or st_desc, r_text
+                via = "render"
+                if r_block and not block:
+                    block = r_block
+    # 渲染尝试结束（或根本未渲染，如静态即长营销壳）→ 对最终页补判首页薄壳。
+    # 覆盖 Kimi/天工根域名落地页：正文不短（未触发渲染门控）却与查询无关。
+    if not block:
+        block = _detect_cn_block(st_title or "", st_desc or "", st_text,
+                                 query=query, allow_thin=True)
+    title = st_title
+    snippet = st_desc or st_text[:200]
+    if not title and not snippet:
+        return None, "none", block
+    return {"url": url, "title": title or f"[{name}] 结果页",
+            "snippet": snippet}, via, block
+
+
+def _search_cn_web(query: str, max_results: int = 5) -> list:
+    """国内网页 AI 搜索最终兜底（长尾中文自动启用；准官方端点）。
+
+    针对 360AI搜 / Kimi探索版 / 天工 等无公开 API 的 JS 前端搜索产品，
+    按四层分层获取，逐层降级，单端点故障互不影响、不拖垮主链：
+      1. 静态抓取（urllib GET 结果页）；
+      2. 渲染抓取（静态为 JS 壳时，l2_renderer 真实浏览器渲染）；
+      3. 结构化降级（title / meta description / 可见正文 best-effort 抽取）；
+      4. 人工核验标记（结果一律标注来源与「准官方端点，需人工核验」）。
+
+    开关：INFOSEEK_CN_AI_SEARCH=1 强制启用；INFOSEEK_CN_AI_AUTO=0 关闭长尾自动启用；
+          INFOSEEK_CN_AI_RENDER=0 禁用渲染层；INFOSEEK_CN_NETGUARD=0 关闭可达性预判。
+    """
+    import urllib.parse
+    # P0-2：长尾中文（CJK 字数 ≥ 6）query 自动启用；短词/通用中文不触发。
+    _auto = bool(query) and _longtail_cn(query) and _env_flag('INFOSEEK_CN_AI_AUTO', True)
+    if os.environ.get('INFOSEEK_CN_AI_SEARCH') != '1' and not _auto:
+        return []
     engines = [
         ("360AI搜", "https://so.com/s?q={q}"),
         ("Kimi探索版", "https://kimi.moonshot.cn/?q={q}"),
         ("天工AI", "https://www.tiangong.cn/?q={q}"),
     ]
-    out = []
-    for name, tpl in engines:
+    # P1-CN4：host 可达性预判。仅「明确不可达（ok is False）」才剔除；
+    # 可达（True）/ 未知（None）/ 探测异常 / netguard OFF -> 保留（fail-open，优雅降级）。
+    if _env_flag('INFOSEEK_CN_NETGUARD', True):
         try:
-            html = _http_get(tpl.replace('{q}', urllib.parse.quote(query)),
-                             timeout=10).decode('utf-8', errors='ignore')
-            # 通用解析：标题 + meta description + 内链文本（best-effort）
-            title = ''
-            m = _re.search(r'<title[^>]*>(.*?)</title>', html, _re.S)
-            if m:
-                title = _re.sub(r'<[^>]+>', '', m.group(1)).strip()[:80]
-            desc = ''
-            m = _re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'](.*?)["\']', html, _re.S)
-            if m:
-                desc = _re.sub(r'<[^>]+>', '', m.group(1)).strip()[:200]
-            if title:
-                out.append({"url": tpl.replace('{q}', urllib.parse.quote(query)),
-                            "title": title, "snippet": desc or f"[{name}] 结果页（非官方端点，请人工核验）"})
+            import net_probe as _np
+            _hosts = []
+            for _, _tpl in engines:
+                _h = urllib.parse.urlparse(_tpl).hostname
+                if _h and _h not in _hosts:
+                    _hosts.append(_h)
+            _reach = _np.check_hosts(_hosts, timeout=2.0)
+            engines = [(nm, tpl) for nm, tpl in engines
+                       if _reach.get(urllib.parse.urlparse(tpl).hostname, {})
+                          .get('ok', None) is not False]
+        except Exception as _e:
+            log.warning(f"[CN-AI-Web] net_probe 预判异常，保守保留全部端点: {_e}")
+    _render_to = float(os.environ.get('INFOSEEK_CN_AI_RENDER_TIMEOUT', '20') or 20)
+    out = []
+    n_render = 0
+    n_blocked = 0
+    for name, tpl in engines:
+        url = tpl.replace('{q}', urllib.parse.quote(query))
+        try:
+            item, via, block = _fetch_one_cn_endpoint(url, name, query, render_timeout=_render_to)
+            if not item:
+                continue
+            if via == "render":
+                n_render += 1
+            item["via"] = via
+            item["note"] = "准官方端点，结果需人工核验"
+            if block:
+                n_blocked += 1
+                item["degraded"] = block
+                item["note"] = f"准官方端点命中{block}，非真实搜索结果，必须人工核验"
+            if not item.get("snippet"):
+                item["snippet"] = f"[{name}] 结果页（准官方端点，请人工核验）"
+            out.append(item)
         except Exception:
-            continue
+            continue  # 单端点故障隔离，不影响其余端点与主链
         if len(out) >= max_results:
             break
-    log.warning(f"[CN-AI-Web] 兜底结果 {len(out)} 条（非官方端点，质量未评级）")
+    log.warning(f"[CN-AI-Web] 兜底结果 {len(out)} 条（渲染 {n_render} / 拦截或薄壳 "
+                f"{n_blocked}；准官方端点，质量未评级，需人工核验）")
     return out
 
 
@@ -434,9 +643,21 @@ def _quota_engines_with_key() -> list:
     return [(n, f) for n, f in _ai_engines() if _engine_has_key(n)]
 
 
-def _default_layer() -> list:
-    """默认层：4 免费引擎 + CN 网页兜底（opt-in，内部自判）。"""
-    return route_engines(_free_engines() + [("CN-AI-Web", _search_cn_web)] + platform_engines())  # 平台 adapter（探测失败 → []）
+def _default_layer(query: str = None) -> list:
+    """默认层：4 免费引擎 + CN 网页兜底。
+
+    P0-2：CJK query 自动并入 CN-AI-Web（不再需 INFOSEEK_CN_AI_SEARCH=1；
+    可用 INFOSEEK_CN_AI_AUTO=0 关闭回到 opt-in）；非 CJK 保留原 opt-in 语义。
+    P1-CN2：长尾中文 query 且 INFOSEEK_CN_PRIORITY=1（默认）时 CN-AI-Web
+    层内前置（中文垂直引擎优先调用）；=0 回到 P0-2 末尾兜底语义。"""
+    layer = _free_engines() + platform_engines()
+    cn = ("CN-AI-Web", _search_cn_web)
+    auto_cn = bool(query) and _longtail_cn(query) and _env_flag('INFOSEEK_CN_AI_AUTO', True)
+    if auto_cn and _env_flag('INFOSEEK_CN_PRIORITY', True):
+        layer.insert(0, cn)          # P1-CN2：中文垂直引擎前置（须在 route_engines 前）
+    elif auto_cn or os.environ.get('INFOSEEK_CN_AI_SEARCH') == '1':
+        layer = layer + [cn]         # P0-2：末尾兜底
+    return route_engines(layer)
 
 
 # ─── v1.7.7 包D：引擎可观测（本轮状态快照）───
@@ -802,12 +1023,66 @@ def _query_type(query: str) -> str:
     return best
 
 
+# P1-CN2：长尾中文 query 时对前置中文垂直引擎提权（默认生效，独立于 DYN_WEIGHT 门控）。
+_CN_PRIORITY_BOOST = {'CN-AI-Web': 0.7}   # 0.3 -> 1.0，与 Exa/DuckDuckGo 同级优先
+_CN_WEIGHT_CAP = 1.0
+
 def _engine_weight_for(name: str, query: str) -> float:
-    """v1.2.x 召回增强：动态层权重（INFOSEEK_RECALL_DYN_WEIGHT=1 时按 query 类型加成）。"""
+    """引擎融合权重。
+    INFOSEEK_RECALL_DYN_WEIGHT=1 时按 query 类型动态加成（v1.2.x）；
+    P1-CN2：长尾中文 query 且 INFOSEEK_CN_PRIORITY=1（默认）时对中文垂直引擎
+    额外提权（封顶 1.0）；非长尾 / 关闭时保留基线权重。"""
     w = _ENGINE_WEIGHT.get(name, 0.5)
-    if not _env_flag('INFOSEEK_RECALL_DYN_WEIGHT', False):
-        return w
-    return w + _TYPE_BOOST.get(_query_type(query), {}).get(name, 0)
+    if _env_flag('INFOSEEK_RECALL_DYN_WEIGHT', False):
+        w = w + _TYPE_BOOST.get(_query_type(query), {}).get(name, 0)
+    if bool(query) and _longtail_cn(query) and _env_flag('INFOSEEK_CN_PRIORITY', True):
+        w = min(_CN_WEIGHT_CAP, w + _CN_PRIORITY_BOOST.get(name, 0.0))
+    return w
+
+
+# P0-1 / P0-2：CJK 判定与长尾中文子查询拆解（CJK 专用，短词/纯英文不拆解）
+_CJK_RE = _re.compile(r'[\u4e00-\u9fff]')
+_CN_QUALIFIERS = (
+    '2026年', '2025年', '2024年', '2023年', '2022年', '2021年', '2020年',
+    '最新', '近年', '今年', '去年', '怎么', '如何', '什么', '为什么', '多少',
+    '哪儿', '哪里', '哪个', '产量', '价格', '多少钱', '排名', '排行榜', '前十',
+    '推荐', '攻略', '教程', '方法', '步骤', '名单', '列表', '汇总', '一览', '详情', '介绍',
+)
+
+
+def _has_cjk(text: str) -> bool:
+    """query 是否含 CJK 字符（P0-2 中文垂直兜底路由依据）。"""
+    return bool(text) and bool(_CJK_RE.search(text or ''))
+
+
+def _longtail_cn(query: str) -> bool:
+    """长尾中文判定（CJK 且 CJK 字数 ≥ 6）：P0-1 子查询拆解 / P0-2 中文垂直兜底
+    的共用触发条件。短词 / 纯英文 / 数字 query 不触发（通用引擎已能服务）。"""
+    if not _has_cjk(query):
+        return False
+    return len(_CJK_RE.findall(query)) >= 6
+
+
+def _decompose_longtail_cn(query: str) -> list:
+    """长尾中文子查询拆解（P0-1）。
+
+    仅对「含 CJK 且 CJK 字数 ≥ 6」的 query 拆解：剥离已知意图/限定词
+    （时间/问句/产出类型）得到核心主题子查询，与原 query 并行召回以覆盖
+    通用/国际引擎对长尾中文召回不足的场景。返回去重后的子查询列表（≤3）。
+    短词 / 纯英文 / 数字 query 原样返回（不引入噪声）。
+    """
+    if not _longtail_cn(query):
+        return [query]
+    core = query
+    for q in _CN_QUALIFIERS:
+        core = core.replace(q, ' ')
+    core = ' '.join(core.split())
+    subs = []
+    for s in (query, core):
+        s2 = s.strip()
+        if s2 and s2 not in subs:
+            subs.append(s2)
+    return subs[:3]
 
 
 def _expand_query(query: str) -> str:
@@ -863,7 +1138,13 @@ def _expand_query(query: str) -> str:
         # 冷启动无图谱 → 纯别名扩展（零行为变化）；噪声由 _filter_relevant 门控兜底。
         # 导入统一走顶层 entity_graph（与 infoseek_core_v2 注册端一致，避免
         # core.entity_graph 双模块状态分裂）。
-        if _env_flag('INFOSEEK_RECALL_GRAPH', True) and len(extra) < 4:
+        # B-3（2026-10-05）：带明确意图槽的长尾 query（如「信阳板栗收购价格」），
+        # 图谱邻居多为主题外实体（产地/品种/旅游），追加进来只会稀释「收购/价格」
+        # 的需求约束并诱发漂移。默认对带意图 query 跳过邻居；INFOSEEK_RECALL_GRAPH_INTENT=1
+        # 可恢复旧行为（邻居噪声由 _filter_relevant 意图槽门控兜底）。
+        _has_intent = bool(_intent_slots(query))
+        _graph_allow = _env_flag('INFOSEEK_RECALL_GRAPH_INTENT', False) or not _has_intent
+        if _env_flag('INFOSEEK_RECALL_GRAPH', True) and _graph_allow and len(extra) < 4:
             try:
                 _core_dir = _P(__file__).parent.parent / 'core'
                 if str(_core_dir) not in _s.path:
@@ -995,16 +1276,102 @@ def _llm_judge_relevance(text: str, query: str) -> float:
         return -1.0
 
 
-def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
-    """主题相关性过滤（v1.0.1 PATCH / P1-2；v1.7.7 包A 门控 v2）
+# B-1 意图槽门控（2026-10-05）：query 除核心实体外往往携带明确的「需求类型」
+# （价格/收购/产量/做法…）。此前硬门槛只要求命中 ≥1 个 query 多字词，核心实体词
+# 在任何通用页都出现，主题漂移页（旅游/百科/营销官网）轻松过关。意图槽要求：query
+# 命中某一意图组时，结果文本除命中核心实体外，还须回显该意图词或其同义/下位词。
+# 仅收录区分性强、漂移页（旅游攻略/百科科普/产品营销）难以自然命中的领域动作/需求词；
+# 疑问虚词（怎么/如何/什么/为什么）与时间词（最新/今年）不入槽——它们不携带主题约束。
+_INTENT_GROUPS = {
+    'price': ('价格', '多少钱', '价位', '报价', '价钱', '单价', '售价', '费用', '收费标准'),
+    'purchase': ('收购', '采购', '批发价', '进货', '供应商', '哪里有卖', '购买渠道', '求购'),
+    'output': ('产量', '亩产', '年产量', '产值', '产能', '种植面积', '产量数据'),
+    'market': ('行情', '走势', '市场价格', '价格走势', '供需', '市场分析', '出口量'),
+    'rank': ('排名', '排行榜', '前十', '品牌排行', '榜单', '十大品牌'),
+    'guide': ('教程', '做法', '做法大全', '怎么做', '制作方法', '步骤', '攻略', '方法'),
+    'company': ('厂家', '生产厂家', '厂商', '公司有哪些', '知名企业', '龙头企业'),
+}
 
-    两层判定：
+
+# 同族意图：价格/收购/行情 同属「贸易」语义簇。长尾 query 常同时命中多组
+# （如「最新收购价格」→ purchase+price），但真实相关页往往只在一组上充分展开
+# （收购商新闻只写「收购/采购」、行情页只写「价格/走势」）。硬要求每组都回显
+# 会误杀同族真相关页，故归并为一簇、簇内任一组回显即视为命中。
+_INTENT_FAMILIES = {
+    'trade': ('price', 'purchase', 'market'),
+}
+_INTENT_GROUP_FAMILY = {g: fam for fam, gs in _INTENT_FAMILIES.items() for g in gs}
+
+
+def _intent_slots(query: str):
+    """返回 query 命中的意图组 → 该组全部触发词（含同义/下位词）映射。
+
+    返回 dict {组名: (query 中实际出现的触发词, 全组触发词)}；无意图 → {}。
+    直接在原 query 上做字面匹配（不依赖分词），对 jieba 切分差异鲁棒。
+    """
+    slots = {}
+    for g, words in _INTENT_GROUPS.items():
+        hit = [w for w in words if w and w in query]
+        if hit:
+            slots[g] = (hit, words)
+    return slots
+
+
+def _core_entity_words(query: str, slots: dict) -> set:
+    """核心实体词：query 多字词中剔除意图词、疑问/限定虚词后的集合。
+
+    用于意图槽校验里的「实体命中」条件。tokenize 为空（纯英文/数字 query）时
+    返回空集，调用方据此退化为仅要求意图命中（避免英文 query 被误杀）。
+    """
+    toks = set(_tokenize_query(query))
+    if not toks:
+        return set()
+    drop = set()
+    for _, (hit, words) in slots.items():
+        drop.update(w for w in words if len(w) >= 2)
+        drop.update(hit)
+    # _CN_QUALIFIERS 中的疑问虚词与年份（≥2 字者）不具实体区分性
+    drop.update(w for w in _CN_QUALIFIERS if len(w) >= 2)
+    return {w for w in toks if w not in drop}
+
+
+def _passes_intent(text_lower: str, query: str, slots: dict) -> bool:
+    """意图槽硬校验：文本须对 query 命中的每个意图组回显 ≥1 个该组触发词，
+    且命中 ≥1 个核心实体词（实体集合为空时豁免实体条件）。
+
+    query 无意图槽 → 返回 True（沿用旧硬门槛语义，纯实体查询不额外约束）。
+    """
+    if not slots:
+        return True
+    # 按意图簇归并：同族的多个命中组只要求簇内任一组回显 ≥1 触发词；
+    # 跨族（如 rank / guide / company）则各自必须有回显。
+    fams = {}
+    for g, (_, words) in slots.items():
+        fam = _INTENT_GROUP_FAMILY.get(g, g)
+        fams.setdefault(fam, []).extend(words)
+    for words in fams.values():
+        if not any(w in text_lower for w in words):
+            return False
+    core = _core_entity_words(query, slots)
+    if core and not any(w in text_lower for w in core):
+        return False
+    return True
+
+
+def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
+    """主题相关性过滤（v1.5.0 意图槽门控；v1.0.1 PATCH / P1-2；v1.7.7 包A 门控 v2）
+
+    三层判定：
     1. 语义分阈值：title+snippet 与 query 的 Jaccard 相似度 ≥ min_score
     2. 多字词硬门槛（v1.0.1b PATCH / P2-1）：query 含中文时，
        用 jieba 提取 query 多字词（≥2 字），要求结果文本至少命中 1 个——
        杜绝「新能源汽车」误匹配「新（汉语汉字）」这类单字噪音。
+    3. 意图槽硬校验（B-1，2026-10-05）：query 命中明确需求类型（价格/收购/
+       产量/做法…）时，结果还须回显该意图词（或同义/下位词）+ 核心实体词——
+       杜绝长尾拆解/图谱邻居召回的主题漂移页（旅游/百科/营销官网）靠命中核心
+       实体词被保送。主判定与两条保底路径统一强制；INFOSEEK_INTENT_GATE=0 关闭。
 
-    若过滤后结果不足 min_expected 则保留原列表（避免过度过滤导致空结果）。
+    若过滤后结果不足 min_expected 则走保底窗口（同样过意图槽），全部不达标返 []。
     返回结果附加 relevance 字段（0-100 语义相似分）。
     """
     if not results:
@@ -1022,6 +1389,9 @@ def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
         # 多字词硬门槛（仅中文 query 启用）；v1.7.7 包A（P0#2）：
         # 统一走 _tokenize_query（jieba 优先 → 缺失回退 + 告警，不再静默失效）
         hard_words = set(_tokenize_query(query))
+        # B-1：意图槽（默认开；INFOSEEK_INTENT_GATE=0 回退旧硬门槛语义）
+        _intent_on = _env_flag('INFOSEEK_INTENT_GATE', True)
+        slots = _intent_slots(query) if _intent_on else {}
 
         kept = []
         for r in results:
@@ -1049,9 +1419,12 @@ def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
             # 未触发（无别名组/无命中/env off）→ bridge=0，判定路径与 v1.8.4 完全一致。
             # ⚠️ _xling_mod 模块对象属性访问（晚绑定），禁 from-import（§8.13.3 铁律）。
             _passed = score >= min_score
+            text_lower = text.lower()
             if _passed and hard_words:
-                text_lower = text.lower()
                 _passed = any(w in text_lower for w in hard_words)
+            # B-1：语义分+多字词双门槛过后，再校验意图槽（实体 × 需求类型）
+            if _passed and slots:
+                _passed = _passes_intent(text_lower, query, slots)
             if not _passed:
                 try:
                     _br = _xling_mod.bridge_score(text, query) or 0
@@ -1080,16 +1453,48 @@ def _filter_relevant(results: list, query: str, min_score: int = 12) -> list:
             floor = int(os.environ.get('INFOSEEK_RELEVANCE_FLOOR', floor))
         except ValueError:
             pass  # env 非法 → 保持默认下限
-        fallback = sorted((r for r in results if r.get('relevance', 0) >= floor),
+        def _floor_ok(r):
+            if r.get('relevance', 0) < floor:
+                return False
+            if slots:
+                _t = (f"{r.get('title', '')} {r.get('snippet', '')}").lower()
+                if not _passes_intent(_t, query, slots):
+                    return False
+            return True
+
+        fallback = sorted((r for r in results if _floor_ok(r)),
                           key=lambda r: r.get('relevance', 0), reverse=True)
         if fallback:
             log.warning(f"[relevance] '{query}' 过滤后 {len(kept)} 条 < 预期 {min_expected}；"
                         f"保底窗口保留 {len(fallback)} 条（≥{floor} 分，按分降序）")
             return fallback[:min_expected]
+        # P0-3：二级保底送 top-k —— 长尾/弱相关 query 连 floor 窗口都无达标时，
+        # 不再「宁缺毋滥」返回空（空结果下游只能覆盖率门控失败），改送原始 relevance
+        # 降序 top-k（默认开；INFOSEEK_RELEVANCE_TOPK_FALLBACK=0 恢复严格空返回）。
+        def _safety_ok(r):
+            if r.get('relevance', 0) <= 0:
+                return False
+            if slots:
+                _t = (f"{r.get('title', '')} {r.get('snippet', '')}").lower()
+                if not _passes_intent(_t, query, slots):
+                    return False
+            return True
+
+        if _env_flag('INFOSEEK_RELEVANCE_TOPK_FALLBACK', True):
+            _k = min(min_expected, len(results))
+            # 仅送「有相关性信号（relevance>0）」且过意图槽的候选，避免漂移页被保送
+            safety = sorted((r for r in results if _safety_ok(r)),
+                            key=lambda r: r.get('relevance', 0), reverse=True)[:_k]
+            if safety:
+                log.warning(f"[relevance] '{query}' 二级保底送 top-{_k}（全候选 <{floor} 分，按分降序）")
+                return safety
         log.warning(f"[relevance] '{query}' 无达标结果（全部 <{floor} 分），返回空（宁缺毋滥）")
         return []
-    except Exception:
-        return results
+    except Exception as e:
+        # B（2026-10-05）：异常时禁止裸返全量（会让未过相关性/意图校验的漂移页
+        # 直接灌进下游）。记日志后返回空，由上层走「无结果」降级，宁缺毋滥。
+        log.warning(f"[relevance] '{query}' 过滤异常，按空结果降级: {e}")
+        return []
 
 
 def _reserve_pool(ai_mode: bool, engines: list) -> list:
@@ -1172,7 +1577,7 @@ def _parallel_merge_with_reserve(engines: list, query: str, max_results: int,
 
 def _search_web_serial(query: str, max_results: int) -> list:
     """顺序降级（INFOSEEK_SEARCH_PARALLEL=0 回退；保留原语义）。"""
-    engines = _default_layer()
+    engines = _default_layer(query)
     if os.environ.get('INFOSEEK_SEARCH_ENGINE', 'auto') == 'ai' and _has_ai_key():
         for name, fn in get_lifecycle().get_active(_ai_engines()):
             try:
@@ -1193,6 +1598,37 @@ def _search_web_serial(query: str, max_results: int) -> list:
     return []
 
 
+def _fanout_recall(engines: list, subqueries: list, max_results: int,
+                   reserve: list, deadline: float | None = None) -> list:
+    """P0-1：子查询扇出并行召回。
+
+    对 subqueries 逐个跑层内并行合并（共享 deadline 限流），url 去重合并；
+    召回达阈值（max(8, max_results*2)）提前收敛，避免长尾拆解放大成本。
+    返回合并后的 [ {url,title,snippet}, ... ]（未评分，交 _filter_relevant 终判）。
+    """
+    if not subqueries:
+        return []
+    if len(subqueries) <= 1:
+        return _parallel_merge_with_reserve(
+            engines, subqueries[0], max_results, reserve, deadline=deadline)
+    collected = {}
+    _cap = max(8, max_results * 2)
+    for sq in subqueries:
+        try:
+            got = _parallel_merge_with_reserve(
+                engines, sq, max_results, reserve, deadline=deadline)
+        except Exception as e:
+            log.warning(f"[fanout] 子查询 '{sq}' 召回失败: {e}")
+            got = []
+        for r in (got or []):
+            u = r.get('url')
+            if u and u not in collected:
+                collected[u] = r
+        if len(collected) >= _cap:
+            break
+    return list(collected.values())
+
+
 def search_web(query: str, max_results: int = 10) -> list:
     """搜索降级链（v1.1.0 并行化）：
 
@@ -1209,8 +1645,17 @@ def search_web(query: str, max_results: int = 10) -> list:
     # v1.2.x 召回增强：query 扩展（默认开）——别名扩展提升跨名召回
     if _env_flag('INFOSEEK_RECALL_EXPAND', True):
         query = _expand_query(query)
+    # P0-1：长尾中文子查询拆解并行召回（默认开；INFOSEEK_CN_SUBQ=0 关闭）
+    subs = (_decompose_longtail_cn(query)
+            if _env_flag('INFOSEEK_CN_SUBQ', True) else [query])
     if os.environ.get('INFOSEEK_SEARCH_PARALLEL', '1') == '0':
-        got_serial = _filter_relevant(_search_web_serial(query, max_results), query)
+        _serial = {}
+        for sq in subs:
+            for r in _search_web_serial(sq, max_results):
+                u = r.get('url')
+                if u and u not in _serial:
+                    _serial[u] = r
+        got_serial = _filter_relevant(list(_serial.values()), query)
         _log_engine_stats(query)
         return got_serial
     ai_mode = os.environ.get('INFOSEEK_SEARCH_ENGINE', 'auto') == 'ai'
@@ -1221,10 +1666,10 @@ def search_web(query: str, max_results: int = 10) -> list:
     if ai_mode and _has_ai_key():
         # AI 模式：AI 引擎（权重高）+ 免费引擎全并行，免费引擎为保留池
         ai_layer = _ai_engines() + _free_engines()
-        got = _parallel_merge_with_reserve(ai_layer, query, max_results,
-                                           get_lifecycle().get_active(
-                                               _reserve_pool(True, ai_layer)),
-                                           deadline=deadline)
+        got = _fanout_recall(ai_layer, subs, max_results,
+                             get_lifecycle().get_active(
+                                 _reserve_pool(True, ai_layer)),
+                             deadline=deadline)
         if got:
             log.info(f"[AI-layer] '{query}' → {len(got)} 条（并行合并）")
             _got = _filter_relevant(got, query)
@@ -1234,15 +1679,15 @@ def search_web(query: str, max_results: int = 10) -> list:
                     + (f"（剩余预算 {_remaining_budget(deadline):.2f}s）" if deadline else ""))
         _sleep_throttle(deadline)
     # 默认层：免费并行 + 限量引擎保留池（配额保护）
-    default_layer = _default_layer()
+    default_layer = _default_layer(query)
     if _env_flag('INFOSEEK_CONCURRENT_ALL', False):
         default_layer = default_layer + _quota_engines_with_key()
         log.info('[concurrent-all] 付费引擎并入主并行（INFOSEEK_CONCURRENT_ALL=1）')
 
-    got = _parallel_merge_with_reserve(default_layer, query, max_results,
-                                       get_lifecycle().get_active(
-                                           _reserve_pool(False, default_layer)),
-                                       deadline=deadline)
+    got = _fanout_recall(default_layer, subs, max_results,
+                         get_lifecycle().get_active(
+                             _reserve_pool(False, default_layer)),
+                         deadline=deadline)
     if got:
         log.info(f"[default-layer] '{query}' → {len(got)} 条（并行合并）")
         _got = _filter_relevant(got, query)

@@ -39,6 +39,15 @@ except ImportError:
         return Path(os.environ.get('INFOSEEK_DATA_DIR', Path.home() / '.infoseek')) / filename
 
 
+def _dep_reg():
+    """S7：外部依赖可用性统一经 dep_registry 事实层求值（懒加载，缺失回退）。"""
+    try:
+        import dep_registry as _dr
+    except ImportError:
+        from core import dep_registry as _dr  # type: ignore
+    return _dr
+
+
 class KeyManagementError(Exception):
     """Key 管理操作异常（加密缺失 / 密钥无效 / 解密失败等）。"""
 
@@ -353,12 +362,11 @@ class KeyManager:
     # ── KeyringBackend（v1.0.1 A3/B1：系统级密钥环持久化）──
     @staticmethod
     def keyring_available() -> bool:
-        """探测 keyring 库可用性（Windows Credential Locker / macOS Keychain / Linux SecretService）。"""
-        try:
-            import keyring  # noqa: F401
-            return True
-        except ImportError:
-            return False
+        """探测 keyring 库可用性（Windows Credential Locker / macOS Keychain / Linux SecretService）。
+
+        S7：可用性经 dep_registry 事实层统一求值（返回值语义不变）。
+        """
+        return _dep_reg().is_available("keyring")
 
     def save_to_keyring(self, service: str = 'infoseek') -> int:
         """将当前注册池写入系统 keyring（service='infoseek'，username='{provider}:{idx}'）。
@@ -419,6 +427,8 @@ class KeyManager:
         key_file = Path(key_path) if key_path else target.with_suffix('.key')
 
         try:
+            if not _dep_reg().is_available("cryptography"):
+                raise ImportError
             from cryptography.fernet import Fernet
         except ImportError:
             raise KeyManagementError(
@@ -467,6 +477,8 @@ class KeyManager:
         if not target.exists() or not key_file.exists():
             return 0
         try:
+            if not _dep_reg().is_available("cryptography"):
+                raise ImportError
             from cryptography.fernet import Fernet, InvalidToken
         except ImportError:
             return 0

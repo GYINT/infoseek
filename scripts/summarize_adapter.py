@@ -14,10 +14,28 @@ import re
 import sys
 from pathlib import Path
 
+_dr = None
+
+
+def _dep_reg():
+    """S7：外部依赖可用性统一经 dep_registry 事实层求值（懒加载，缺失回退）。"""
+    global _dr
+    if _dr is None:
+        import os as _os
+        import sys as _sys
+        _core = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'core')
+        if _core not in _sys.path:
+            _sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 def _summa_summarize(text: str, max_words: int = 100) -> dict:
     """summa TextRank 主路径（沙箱内置，零依赖）"""
     try:
-        # 在 try 块顶部 import，避免与外层函数名 _summa_summarize 冲突
+        # S7：可用性经 dep_registry 统一求值；在 try 块顶部 import，避免与外层函数名冲突
+        if not _dep_reg().is_available("summa"):
+            return None
         from summa.summarizer import summarize as summa_summarize_fn
         from summa.keywords import keywords as summa_keywords_fn
 
@@ -185,26 +203,33 @@ def _jieba_summarize(text: str, max_words: int = 100) -> dict:
     1. jieba.analyse.textrank 提取关键词（类似 summa 但更擅长中文）
     2. jieba.cut 切分词 + 词频统计 → 生成摘要
     """
+    # 2026-09-29：jieba 探测/初始化统一经 jieba_bridge（原裸 import jieba/
+    # jieba.analyse 两处；收敛后进程内探测一次）
+    import sys as _sys
+    import os as _os
+    _core = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'core')
+    if _core not in _sys.path:
+        _sys.path.insert(0, _core)
     try:
-        import jieba
-        import jieba.analyse
-
+        import jieba_bridge as _jb
+    except Exception:
+        return None
+    if _jb.get_jieba() is None:
+        return None
+    try:
         # 关键词（Textrank 算法，中文友好）
-        try:
-            kw_list = jieba.analyse.textrank(text, topK=15, withWeight=False)
-            keywords = [k for k in kw_list if k.strip() and len(k) > 1]
-        except Exception:
+        keywords = [k for k in _jb.textrank(text, 15) if len(k) > 1]
+        if not keywords:
             # 降级到 TF-IDF
-            kw_list = jieba.analyse.extract_tags(text, topK=15)
-            keywords = [k for k in kw_list if k.strip() and len(k) > 1]
+            keywords = [k for k in _jb.extract_tags(text, 15) if len(k) > 1]
 
         # 摘要（用词频 + 位置权重）
         try:
-            words = jieba.lcut(text)
+            words = _jb.lcut(text)
             # 统计词频（过滤停用词）
             stop_words = set(['的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都', '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会', '着', '没有', '看', '好', '自己', '这'])
             word_freq = {}
-            for w in words:
+            for w in (words or []):
                 if len(w) < 2 or w in stop_words:
                     continue
                 word_freq[w] = word_freq.get(w, 0) + 1
@@ -218,7 +243,8 @@ def _jieba_summarize(text: str, max_words: int = 100) -> dict:
             for s in sentences:
                 if not s.strip():
                     continue
-                score = sum(word_freq.get(w, 0) for w in jieba.lcut(s) if w in top_words_set)
+                _s_toks = _jb.lcut(s) or []
+                score = sum(word_freq.get(w, 0) for w in _s_toks if w in top_words_set)
                 if score > 0:
                     scored.append((score, s.strip()))
 

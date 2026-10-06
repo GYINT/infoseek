@@ -30,6 +30,16 @@ from typing import Dict, List, Optional
 _CORE_DIR = Path(__file__).parent
 _REGISTRY_PATH = _CORE_DIR.parent / "capabilities" / "registry.yaml"
 
+# ── G1（边界硬化 openfix）：单例别名，根治双导入路径状态分裂 ──────────
+# 本模块既可能以顶层名 `capability_registry`（scripts/ 直接把 core/ 注入 sys.path）
+# 导入，也可能以包路径 `core.capability_registry` 导入。两条路径会各建一份模块对象
+# ⇒ `_cache` / `_consent_state` 模块级状态分裂（consent 授权跨消费方不可见）。
+# 加载时把自身登记到「另一个名字」，保证任一路径都解析到同一模块对象。
+import sys as _sys
+for _alias in ("capability_registry", "core.capability_registry"):
+    if _alias != __name__ and _alias not in _sys.modules:
+        _sys.modules[_alias] = _sys.modules[__name__]
+
 # 内嵌默认（与 capabilities/registry.yaml 同步；PyYAML 缺失时回退）
 _DEFAULT_REGISTRY = {
     "version": 1,
@@ -37,7 +47,16 @@ _DEFAULT_REGISTRY = {
         {"name": "QVeris", "kind": "structured_data_api", "enabled": True,
          "requires_consent": False, "auth_env": "QVERIS_API_KEY", "weight": 0.9,
          "cost_model": "credits", "health_probe": "engine_lifecycle",
-         "degrade_to": ["Exa", "Tavily"]},
+         "degrade_to": ["Exa", "Tavily", "manual_review"]},
+        # G3（边界硬化）：Exa/Tavily 搜索替代层占位声明，消除悬空引用
+        {"name": "Exa", "kind": "search_api", "enabled": False,
+         "requires_consent": False, "auth_env": "EXA_API_KEY", "weight": 0.7,
+         "cost_model": "credits", "health_probe": "engine_lifecycle",
+         "degrade_to": [], "venv_hint": ""},
+        {"name": "Tavily", "kind": "search_api", "enabled": False,
+         "requires_consent": False, "auth_env": "TAVILY_API_KEY", "weight": 0.7,
+         "cost_model": "credits", "health_probe": "engine_lifecycle",
+         "degrade_to": [], "venv_hint": ""},
         {"name": "Maigret", "kind": "identity_attribution", "enabled": False,
          "requires_consent": True, "auth_env": "", "weight": 0.9,
          "cost_model": "none", "cli": "maigret", "health_probe": "engine_lifecycle",
@@ -106,6 +125,10 @@ _DEFAULT_REGISTRY = {
     ],
     # GA12 host 台账（内嵌回退副本，与 registry.yaml network_boundaries 同步）
     "network_boundaries": [
+        {"host": "qveris.ai", "boundary": "open",
+         "used_by": ["QVeris"]},
+        {"host": "qveris.cn", "boundary": "open",
+         "used_by": ["QVeris"]},
         {"host": "www.wikidata.org", "boundary": "sandbox_restricted",
          "used_by": ["WikiVerify"]},
         {"host": "query.wikidata.org", "boundary": "sandbox_restricted",
@@ -174,11 +197,18 @@ def _load_raw() -> Dict:
         data = None
         try:
             if _REGISTRY_PATH.exists():
+                # S7：PyYAML 可用性经 dep_registry 事实层统一求值
                 try:
-                    import yaml  # PyYAML（requirements.txt 已声明）
-                    data = yaml.safe_load(_REGISTRY_PATH.read_text(encoding="utf-8"))
+                    import dep_registry as _dr
                 except ImportError:
-                    data = None  # 回退内嵌
+                    from core import dep_registry as _dr  # type: ignore
+                if _dr.is_available("PyYAML"):
+                    try:
+                        import yaml
+                        data = yaml.safe_load(_REGISTRY_PATH.read_text(encoding="utf-8"))
+                    except ImportError:
+                        data = None  # 回退内嵌
+                # 无 PyYAML 时 data 保持 None → 回退 _DEFAULT_REGISTRY
         except Exception:
             data = None
         _cache = data if (isinstance(data, dict) and data.get("capabilities")) else _DEFAULT_REGISTRY

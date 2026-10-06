@@ -41,6 +41,17 @@ from state_dir import get_archives_dir
 # GA5 分词单源化（v1.8.4）：唯一分词真源；_tokenize_subject 退化为薄封装委托
 from text_tokenizer import tokenize_text
 
+# ── S7：dep_registry 事实层惰性 accessor（core/ 已在上面注入 sys.path，零漂移）──
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 
 def infos_to_seek(anchor: dict) -> Optional[dict]:
     """
@@ -131,6 +142,8 @@ def compute_semantic_similarity(text: str, subject: str, method: str = "jaccard"
             return _jaccard_similarity(text, subject)
 
         elif method == "summa":
+            if not _dep_reg().is_available("summa"):
+                return _jaccard_similarity(text, subject)
             from summa.keywords import keywords as summa_keywords
 
             text_kw_text = summa_keywords(text, words=20)
@@ -290,24 +303,30 @@ def _extract_keywords_cached(text: str, max_keywords: int = 20) -> frozenset:
     candidates = []
 
     # 1. summa 路径（英文友好）
-    try:
-        from summa.keywords import keywords as summa_keywords
-        kw_text = summa_keywords(text, words=max_keywords)
-        kw_set = set(
-            k.strip().lower()
-            for k in kw_text.split('\n')
-            if k.strip() and len(k.strip()) >= 2
-        )
-        if kw_set:
-            candidates.append(("summa", kw_set))
-    except Exception:
-        pass
+    if _dep_reg().is_available("summa"):
+        try:
+            from summa.keywords import keywords as summa_keywords
+            kw_text = summa_keywords(text, words=max_keywords)
+            kw_set = set(
+                k.strip().lower()
+                for k in kw_text.split('\n')
+                if k.strip() and len(k.strip()) >= 2
+            )
+            if kw_set:
+                candidates.append(("summa", kw_set))
+        except Exception:
+            pass
 
     # 2. jieba 路径（中文友好）
+    # 2026-09-29：探测/初始化统一经 jieba_bridge（原裸 import 每次调用）
+    import sys as _sys
+    import os as _os
+    _core = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'core')
+    if _core not in _sys.path:
+        _sys.path.insert(0, _core)
     try:
-        import jieba.analyse
-        kw_list = jieba.analyse.textrank(text, topK=max_keywords, withWeight=False)
-        kw_set = set(k.strip() for k in kw_list if k.strip() and len(k.strip()) >= 2)
+        import jieba_bridge as _jb
+        kw_set = {k for k in _jb.textrank(text, max_keywords) if len(k) >= 2}
         if kw_set:
             candidates.append(("jieba", kw_set))
     except Exception:
@@ -431,10 +450,15 @@ def _extract_concepts(text: str, top_k: int = 20) -> set:
     concepts = set()
 
     # 1. jieba 关键词（中文）
+    # 2026-09-29：经 jieba_bridge 探测（原裸 import）
+    import sys as _sys
+    import os as _os
+    _core = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'core')
+    if _core not in _sys.path:
+        _sys.path.insert(0, _core)
     try:
-        import jieba.analyse
-        kw_list = jieba.analyse.textrank(text, topK=top_k, withWeight=False)
-        for kw in kw_list:
+        import jieba_bridge as _jb
+        for kw in _jb.textrank(text, top_k):
             if len(kw) >= 2:
                 concepts.add(kw)
     except Exception:

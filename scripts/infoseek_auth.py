@@ -27,6 +27,21 @@ import json
 import os
 import time
 
+# ── S7：dep_registry 事实层惰性 accessor（cryptography 可选点零漂移收口）──
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        import sys as _sys
+        _core = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'core')
+        if _core not in _sys.path:
+            _sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 # ── 签名密钥（server 与直接导入方必须一致）──
 JWT_SECRET = os.environ.get("INFOSEEK_JWT_SECRET", "infoseek-default-jwt-secret-v1")
 TOKEN_PREFIX = "infoseek."
@@ -130,6 +145,8 @@ class SecretCipher:
         self.master_key = master_key
         self._fernet = None
         try:
+            if not _dep_reg().is_available("cryptography"):
+                raise ImportError("cryptography unavailable")
             from cryptography.fernet import Fernet
             key = base64.urlsafe_b64encode(hashlib.sha256(master_key.encode("utf-8")).digest())
             self._fernet = Fernet(key)

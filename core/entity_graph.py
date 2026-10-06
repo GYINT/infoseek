@@ -65,7 +65,7 @@ class EntityGraph:
         实测 100 源 159ms → ~50ms（3x 提速）。权重改用 Jaccard 归一化
         (count / 该对中低频实体的源数) 让低频实体边权更高、信息量更大。
         """
-        from ner import extract_entities
+        from ner import extract_entities_cached as extract_entities
         from collections import Counter
         from itertools import combinations
 

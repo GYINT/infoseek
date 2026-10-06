@@ -27,6 +27,12 @@ from typing import List, Dict, Optional
 CORE_DIR = Path(__file__).parent
 sys.path.insert(0, str(CORE_DIR))
 
+# G8-apply: 公共入口类型契约守卫（纯 stdlib，scripts/entry_guard.py）
+_SCRIPTS_DIR = str(CORE_DIR.parent / 'scripts')
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+from entry_guard import (require_text, require_mapping, require_sequence, coerce_mapping_list)
+
 ALIAS_CACHE_TTL = 300   # v2.3.1: 复用 v2.2.1 TTL 模式
 
 
@@ -81,6 +87,15 @@ def _extract_events_for_claim(body: str, subject: str) -> List[Dict]:
         return []
 
 
+def _as_text(v) -> str:
+    """字段值安全转文本（G2 边界硬化）：None → ''，非 str → str(v)。"""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    return str(v)
+
+
 def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]] = None) -> List[Dict]:
     """从来源提取 (canonical_entity, claim_text) 对
 
@@ -90,7 +105,7 @@ def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]
     """
     if alias_map is None:
         alias_map = _build_alias_map()
-    from ner import extract_entities
+    from ner import extract_entities_cached as extract_entities
 
     claims = []
     seen = set()
@@ -98,12 +113,15 @@ def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]
         # P3 claim 质量（2026-09-10）：正文优先，标题不再拼接——
         # 标题词不必然出现在正文，拼接会把「标题词汇」误提为事实 claim；
         # 仅正文/snippet 全缺时以标题兜底（弱声明，宁缺毋弱）。
-        body = src.get('text', '') or src.get('snippet', '') or ''
-        text = body if body else src.get('title', '')
+        # G2（边界硬化）：字段空值/类型守卫 —— 任一坏源不得 abort 全链。
+        # 此前 title 显式为 None 时 text=None → .strip() 抛 AttributeError，
+        # 使整份跨源矛盾检测中止（单坏源连带废弃全部有效源比对）。
+        body = _as_text(src.get('text')) or _as_text(src.get('snippet'))
+        text = body or _as_text(src.get('title'))
         if not text.strip():
             continue
         entities = extract_entities(text)
-        url = src.get('url', '') or src.get('title', 'Untitled')
+        url = _as_text(src.get('url')) or _as_text(src.get('title')) or 'Untitled'
         for e in entities:
             canonical = normalize_entity(e['entity_name'], alias_map)
             key = (canonical, url)
@@ -115,7 +133,7 @@ def _extract_fact_claims(sources: List[Dict], alias_map: Optional[Dict[str, str]
                 'entity_name': canonical,
                 'mention': mention,
                 'source': url,
-                'source_title': src.get('title', 'Untitled'),
+                'source_title': _as_text(src.get('title')) or 'Untitled',
                 'text': text[:500],
                 # v2.1.2（F-06）：在**完整正文**（未截断）上抽事件，随 claim 传递
                 'events': _extract_events_for_claim(text, canonical),
@@ -138,6 +156,23 @@ def _collect_mentions(text: str, entity_name: str, alias_map: Optional[Dict[str,
             if idx >= 0:
                 mentions.append(text[idx:idx + len(alias)])
     return list(dict.fromkeys(mentions))
+
+
+def _score_pair_hybrid(claim_a: Dict, claim_b: Dict) -> Optional[Dict]:
+    """对配对成功的异源 claim 调混合矛盾打分（GA11 接线）。
+
+    此前 _group_and_detect 只做分组+配对+结构组装，severity 恒为 'medium'，
+    contradiction_scorer 的键控事实槽/否定路（A 层）与 LLM 槽（B 层）从未接入
+    v3 生产主链。此处在组装后补打分，返回打分结果供回写；失败静默降级 None，
+    保持原 'medium' 兜底，不击穿检测主链。
+
+    用模块对象导入（永久约束）：禁 from-import，保证测试 mock.patch 在消费点生效。
+    """
+    try:
+        import contradiction_scorer as _cs
+        return _cs.score_contradiction_hybrid(claim_a, claim_b)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _group_and_detect(claims: List[Dict], alias_map: Dict[str, str]) -> List[Dict]:
@@ -178,6 +213,20 @@ def _group_and_detect(claims: List[Dict], alias_map: Dict[str, str]) -> List[Dic
                 + _collect_mentions(b['text'], entity_name, alias_map)
             )),
         }
+        # GA11 接线：配对成功后调混合打分，回写 severity 与键控/LLM 槽证据。
+        # 默认 OFF（INFOSEEK_CONTRADICTION_LLM 未开）→ 走 A 层本地键控，severity
+        # 由真实矛盾分决定（_sev），不再恒为 medium；打分为 none 时保留 'medium'
+        # 兜底会造成噪声，故 none→'low'，仅当打分不可用（None）才保留 'medium'。
+        scored = _score_pair_hybrid(conflict['claim_a'], conflict['claim_b'])
+        if scored is not None:
+            sev = scored.get('severity') or 'low'
+            conflict['severity'] = sev if sev != 'none' else 'low'
+            conflict['contradiction_score'] = scored.get('score', 0)
+            conflict['conflict_slots'] = list(scored.get('conflict_slots') or [])[:12]
+            conflict['scorer_mode'] = scored.get('scorer_mode', 'negation')
+            conflict['llm_used'] = bool(scored.get('llm_used', False))
+            if scored.get('reasons'):
+                conflict['scorer_reasons'] = list(scored['reasons'])[:6]
         conflicts.append(conflict)
     return conflicts
 
@@ -356,6 +405,8 @@ def detect_conflicts_v3(sources: List[Dict], subject: str = '') -> Dict:
         {'conflicts': [...], 'raw_claims': N, 'version': '3.0.0',
          'subject', 'total_sources', 'aliases_involved', 'live_alerts'}
     """
+    # G8-apply: 元素级坏源隔离（[None] 等坏元素跳过 + warning，保留整链存活）
+    sources = coerce_mapping_list(sources, "sources", skip_bad=True)
     return ConflictMonitor().ingest_all(sources).finalize(subject=subject)
 
 

@@ -20,6 +20,14 @@ import time
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
 
+# G8-apply: 公共入口类型契约守卫（纯 stdlib，scripts/entry_guard.py）
+import sys as _eg_sys
+from pathlib import Path as _eg_p
+_eg_dir = str(_eg_p(__file__).resolve().parent.parent / 'scripts')
+if _eg_dir not in _eg_sys.path:
+    _eg_sys.path.insert(0, _eg_dir)
+from entry_guard import (require_text, require_mapping, require_sequence, coerce_mapping_list)
+
 
 @dataclass
 class ProviderConfig:
@@ -445,6 +453,8 @@ def _mock_generate(prompt: str, provider_name: str) -> str:
 def estimate_cost(prompt: str, max_tokens: int = 200,
                   prefer_cheap: bool = True) -> Dict[str, Any]:
     """估算调用成本（不实际执行）"""
+    # G8-apply: 类型契约守卫（拒绝 None/非 str → 受控 TypeError，替代 None.split 崩溃）
+    require_text(prompt, "prompt")
     provider = select_provider(prefer_cheap)
     if provider is None:
         return {'error': '无可用 provider'}

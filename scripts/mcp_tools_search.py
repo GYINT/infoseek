@@ -8,6 +8,20 @@ from typing import Any, Dict, List, Optional
 
 from mcp_tools_common import INFOSEEK_ROOT
 
+# ── S7：dep_registry 事实层惰性 accessor（playwright/whisper 可选点零漂移收口）──
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _core = str(Path(__file__).resolve().parent.parent / "core")
+        if _core not in sys.path:
+            sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 
 # ══ 以下函数由 G11 拆分脚本从 infoseek_mcp_server.py 提取（v1.0.1）══
 
@@ -387,6 +401,8 @@ def _fetch_render_with_playwright(url: str, timeout: int = 15) -> str:
         log.warning(f"[L2] 多引擎渲染失败: {e}")
         return ""
     # ── 回退：原生 playwright（单引擎旧行为）──
+    if not _dep_reg().is_available("playwright"):
+        return ""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -445,6 +461,8 @@ def _fetch_with_credential(url: str, host: str, timeout: int = 15) -> str:
       - `Cookie: <name>=<value>` 前缀（登录源，解析为 playwright cookie）
     凭证缺失 / playwright 不可用 / 启动失败 → 返回 ""（降级 L1/L2，零侵入）。
     """
+    if not _dep_reg().is_available("playwright"):
+        return ""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -552,6 +570,10 @@ def _probe_media(url: str) -> Optional[Dict]:
         available = False
         note = 'whisper 转录为可选能力；未启用时 transcript=None（降级）。'
         try:
+            # S7：此处语义=直接尝试 import（须识别 sys.modules 注入的 mock，不可用 is_available 缓存），
+            # 故用 has_module 探测真实 import 名「whisper」，与收口前裸 import 行为零漂移。
+            if not _dep_reg().has_module("whisper"):
+                raise ImportError("whisper unavailable")
             import whisper  # noqa: F401  # 可选依赖
             if kind in ('video', 'audio'):
                 available = True

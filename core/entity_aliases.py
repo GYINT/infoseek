@@ -239,12 +239,11 @@ class EntityAliases:
             window = 30  # 正常窗口
             min_alias_len = 3
 
-        # v2.1.3: 预判 jieba 可用性
-        try:
-            import jieba.posseg as pseg
-            HAS_JIEBA = True
-        except ImportError:
-            HAS_JIEBA = False
+        # v2.1.3 / 2026-09-29: jieba 词性能力统一经 jieba_bridge 探测（进程内缓存，
+        # 原实现每次调用裸 try-import；收敛后仅一次，热路径零 import 开销）
+        import jieba_bridge as _jb
+        pseg = _jb.get_posseg()
+        HAS_JIEBA = pseg is not None
 
         # v2.1.3: 常见谓词（中文动词/形容词，jieba 不可用时的 fallback 过滤）
         VERB_STOPWORDS = {

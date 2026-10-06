@@ -127,30 +127,20 @@ def load_surname_data(force: bool = False) -> dict:
     return _DATA
 
 
-# ── pypinyin 探测（进程内一次，GA8 教训：禁止热路径重复 try-import）──
-_PYPINYIN = None
-_PYPINYIN_PROBED = False
-_PINYIN_WARNED = False
+# ── pypinyin / jieba 统一经 jieba_bridge 探测（2026-09-29 六处裸 import 收敛）──
+# 探测/初始化/告警全部收口到 core/jieba_bridge.py（进程内一次、降级永不抛错）；
+# 本模块不再保留独立 try-import 与模块级探测状态，避免双套状态口径漂移。
+import jieba_bridge as _jb  # 顶层模块名导入：与 core.jieba_bridge 经 sys.modules 双登记合一
 
 
 def _probe_pypinyin():
-    global _PYPINYIN, _PYPINYIN_PROBED
-    if not _PYPINYIN_PROBED:
-        try:
-            import pypinyin
-            _PYPINYIN = pypinyin
-        except Exception:
-            _PYPINYIN = None
-        _PYPINYIN_PROBED = True
-    return _PYPINYIN
+    """委托 bridge 探测 pypinyin（保留名字以向后兼容既有调用点/测试）。"""
+    return _jb.get_pypinyin()
 
 
 def _warn_pinyin_once() -> None:
-    global _PINYIN_WARNED
-    if not _PINYIN_WARNED:
-        log.warning("[person_ner] pypinyin 未安装 → 拼音别名降级为空"
-                    "（检测/注册不受影响；建议 pip install pypinyin）")
-        _PINYIN_WARNED = True
+    """委托 bridge：pypinyin 缺失一次性告警。"""
+    _jb.warn_pypinyin_once()
 
 
 # ── 常用词守卫（jieba 词典词频；2026-09-14 实测标定）─────────────────
@@ -159,29 +149,17 @@ def _warn_pinyin_once() -> None:
 # （建国3083/文化34860 为边界代价：文化类高频"名字词"text 模式拒判，
 #   精度优先，漏检由 subject 引导注册 + 静态词典/learn 通道兜底）。
 _COMMON_GIVEN_FREQ = 20000
-_JIEBA_DT = None
-_JIEBA_PROBED = False
 
 
 def _freq_common(word: str) -> bool:
     """二字组合是否为 jieba 词典高频常用词（≥ _COMMON_GIVEN_FREQ）。
 
     jieba 缺失/未初始化 → False（守卫收窄，检测仍工作——降级不阻断）。
-    懒初始化：仅首个通过其余守卫的候选触发建词典（~1s/进程，一次性）。
+    词频查询委托 bridge：jieba.dt 探测 + initialize 进程内一次
+    （懒初始化：仅首个候选触发建词典，~1s/进程一次性）。
     """
-    global _JIEBA_DT, _JIEBA_PROBED
-    if not _JIEBA_PROBED:
-        try:
-            import jieba
-            jieba.dt.initialize()
-            _JIEBA_DT = jieba.dt
-        except Exception:
-            _JIEBA_DT = None
-        _JIEBA_PROBED = True
-    if _JIEBA_DT is None:
-        return False
     try:
-        return _JIEBA_DT.FREQ.get(word, 0) >= _COMMON_GIVEN_FREQ
+        return _jb.word_freq(word) >= _COMMON_GIVEN_FREQ
     except Exception:
         return False
 
@@ -218,10 +196,8 @@ def surname_readings(surname: str) -> list:
     pp = _probe_pypinyin()
     if pp is None:
         return []
-    try:
-        return [pp.lazy_pinyin(surname)]
-    except Exception:
-        return []
+    _v = _jb.lazy_pinyin(surname)
+    return [_v] if _v else []
 
 
 def _given_syllables(given: str) -> list:
@@ -231,10 +207,7 @@ def _given_syllables(given: str) -> list:
     if pp is None:
         _warn_pinyin_once()
         return []
-    try:
-        return pp.lazy_pinyin(given)
-    except Exception:
-        return []
+    return _jb.lazy_pinyin(given) or []
 
 
 # ── 人名检测（②：整词优先长匹配 + 分层守卫）─────────────────────────

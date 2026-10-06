@@ -171,6 +171,14 @@ def aggregate_score_v2(base_score: float, *,
         after_whitelist / after_decay / final_score / classification /
         whitelist_triggered / top3_triggered(DEPRECATED 恒 False) / decay_factor
     """
+    # 0) G4/G5（边界硬化 openfix）：入口有限性 + 类型守卫 ——
+    #    NaN / None / ±inf / 非数字 → 归零并置 score_invalid 留痕；
+    #    负值最终由下界夹取（max 0）收纳。禁止 NaN / 负分静默传播到下游分类。
+    score_invalid = False
+    if (not isinstance(base_score, (int, float))) or (base_score != base_score) \
+            or base_score in (float("inf"), float("-inf")):
+        score_invalid = True
+        base_score = 0
     # 1) 复活门控（简化复活；数值 no-op，标志位有效 —— 见 docstring 口径事实）
     final = base_score
     whitelist_triggered = False
@@ -191,7 +199,7 @@ def aggregate_score_v2(base_score: float, *,
         after_decay = round(after_decay * 0.95 + semantic_score * 0.05, 1)
 
     # 5) 信任加权（0-30，trust_sources 内已封顶）
-    final_score = min(after_decay + trust_bonus, 100)
+    final_score = min(max(after_decay + trust_bonus, 0), 100)  # G5：上下界双夹取
 
     # 6) 领域加权（0-20，domain_router.domain_bonus_cap 可配）
     if domain_bonus:
@@ -213,6 +221,7 @@ def aggregate_score_v2(base_score: float, *,
         'whitelist_triggered': whitelist_triggered,
         'top3_triggered': False,   # DEPRECATED（v1 双层复活已废弃，见 compute_final_score_v2 注释）
         'decay_factor': decay,
+        'score_invalid': score_invalid,   # G4：入参非法（NaN/None/±inf/非数字）留痕
     }
 
 

@@ -1,5 +1,5 @@
 """
-infoseek_zerodep_nlp.py — 零依赖 NLP 原语（v1.0.0）
+infoseek_zerodep_nlp.py — 零依赖 NLP 原语（v1.2.0）
 =====================================================================
 
 设计目标
@@ -11,9 +11,17 @@ infoseek_zerodep_nlp.py — 零依赖 NLP 原语（v1.0.0）
    前两级可用时以其结果为准（不降级、不经过标准库过滤）；
    仅当外部 NLP 不可用/无结果时，才启用零依赖共识兜底。
 3. **冗余验证兜底精度（最终兜底分支的硬约束）**：
-   当无外部 NLP 时，并行运行多重独立的纯标准库估计器，
-   通过「共识投票」(consensus voting) 只保留被 >=2 个估计器共同认可的候选词，
-   再经最长匹配抑制 + 停用词闸，在弱分词环境下保持高精度。
+   当无外部 NLP 时，并行运行多重独立的纯标准库估计器
+   （A 多粒度 n-gram / B 位置加权 / C 文档频率 / **D 内置高频词典锚点**），
+   通过「加权共识投票」(weighted consensus voting) 只保留被多估计器共同认可
+   的候选词，再经最长匹配抑制 + 停用词闸，在弱分词环境下保持高精度。
+4. **单频专业词锚点（v1.1.0）**：内置小型跨领域高频词典（≈250 中 + 40 英），
+   解决 n-gram 对「只出现 1 次的专业词/词表输入」全盲的长尾召回缺口。
+5. **动态锚点受控消费（v1.2.0，S5 晋级真锚）**：经统一访问函数
+   `_active_zh_anchors()` 在显式开关 `INFOSEEK_LEARNED_ANCHORS=1` 下，
+   将 learned_anchor_store 中裁决为 accept 的词与基线词典并集消费；
+   默认关闭时逐字节回退基线 `_ZH_HIGH_FREQ`。对 store 仅惰性、可降级访问，
+   主链不产生任何顶层硬依赖（import 失败/存储损坏一律回退基线）。
 
 这是 infoseek 跨多生态平台发行（WorkBuddy / ima / Claude / Dify / Coze / 通用 MCP）
 的底座前提：核心在「零 pip 安装」下也能产出可信结果。
@@ -31,6 +39,22 @@ import math
 import re
 from collections import Counter
 from typing import Iterable, List, Sequence, Set, Tuple
+
+# ── S7：dep_registry 事实层惰性 accessor（零漂移，仅外部 NLP 可选点消费）──
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        import os as _os
+        import sys as _sys
+        _core = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'core')
+        if _core not in _sys.path:
+            _sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
 
 # ---------------------------------------------------------------------------
 # 内置资源（纯标准库，无外部字典文件依赖）
@@ -57,6 +81,84 @@ _EN_STOP = set(
     "which who whom whose what why how all any each few many much one two new first"
     .split()
 )
+
+# ── 内置小型高频词典（v1.1.0 增强：词表式切词锚点）──────────────────
+# 设计目的：n-gram 估计器只认「重复出现的字符串」，对**只出现 1 次的专业词**
+# （如词表输入「人工智能 大模型 量化交易」、长尾主题词）天然无能为力。
+# 内置一份**小而高频**的跨领域词表作「词典匹配估计器」（估计器 D）：
+# 在零 jieba 环境下提供确定性切词锚点，单频专业词也能被召回；
+# 精度由「共识投票 + 最长匹配抑制」兜底，词典只做候选供给，不直接定结果。
+# 规模刻意保持小型（≈250 词，纯字面常量，零外部文件依赖）；
+# 收录原则：跨调研场景高复现的实义词，**不收**停用/泛指词（那些在 _ZH_STOP）。
+_ZH_HIGH_FREQ = frozenset(
+    # ── 科技 / 互联网 / AI ──
+    "人工智能 大模型 自然语言处理 深度学习 机器学习 神经网络 生成式 语言模型 "
+    "智能体 算力 算法 数据 数据库 向量数据库 语义搜索 知识图谱 推荐系统 "
+    "计算机视觉 语音识别 自动驾驶 机器人 芯片 半导体 操作系统 云计算 区块链 "
+    "开源 代码 软件 互联网 数字化 信息化 服务器 传感器 无人机 新能源汽车 电动车 "
+    # ── 金融 / 经济 / 商业 ──
+    "量化交易 量化投资 交易策略 风险控制 风险管理 投资组合 资产管理 资产配置 "
+    "基本面 技术分析 市场份额 商业模式 盈利模式 产业链 供应链 供应链金融 "
+    "宏观经济 货币政策 财政政策 上市公司 融资 并购 估值 市值 股价 基金 债券 "
+    "期货 期权 外汇 利率 通胀 通缩 营收 利润 现金流 初创公司 创业 竞争格局 "
+    # ── 医疗 / 健康 / 生物 ──
+    "医疗卫生 医疗健康 医疗器械 生物医药 临床试验 创新药 仿制药 中医药 "
+    "基因编辑 细胞治疗 免疫治疗 疫苗 诊断 康复 养老 养生 健康管理 公共卫生 "
+    # ── 能源 / 材料 / 工业 ──
+    "新能源 可再生能源 光伏 风电 储能 锂电池 氢能 核能 石油 天然气 煤炭 电力 "
+    "新材料 纳米材料 复合材料 高端制造 智能制造 工业互联网 自动化 装备制造 "
+    "钢铁 水泥 化工 有色金属 碳排放 碳中和 碳达峰 节能环保 环境保护 污染治理 "
+    # ── 消费 / 教育 / 文娱 / 社会 ──
+    "电子商务 直播带货 社交媒体 内容平台 在线教育 职业教育 文化旅游 影视娱乐 "
+    "游戏产业 品牌营销 消费者 用户体验 新零售 物流配送 房地产 基础设施 "
+    "乡村振兴 现代农业 粮食安全 公共服务 社会保障 政府政策 法律法规 行业研究 "
+    "市场研究 发展趋势 市场规模 竞争优势 核心技术 解决方案 产品服务".split()
+)
+
+# 小型英文领域词典（AI/科技/商业高频；与中文词典同一估计器机制）
+_EN_HIGH_FREQ = frozenset(
+    "machine learning deep learning neural network artificial intelligence "
+    "large language model generative ai data science computer vision "
+    "natural language processing vector database semantic search knowledge graph "
+    "recommendation system autonomous driving cloud computing blockchain "
+    "open source operating system semiconductor supply chain business model "
+    "market share risk management asset allocation portfolio quantitative trading "
+    "trading strategy interest rate cash flow startup merger acquisition "
+    "healthcare medical device clinical trial gene therapy vaccine "
+    "renewable energy solar wind energy storage lithium battery electric vehicle "
+    "carbon neutral e-commerce social media online education video game "
+    "user experience brand marketing market research industry trend".split()
+)
+
+
+def _active_zh_anchors() -> frozenset:
+    """统一访问协议：返回当前生效的中文锚点词典（S5 晋级真锚）。
+
+    - 默认（INFOSEEK_LEARNED_ANCHORS 未开启）：逐字节回退基线
+      `_ZH_HIGH_FREQ`，行为与 v2.3.0 完全一致；
+    - 显式开启：返回「基线 ∪ learned_anchor_store 中裁决为 accept 的词」。
+
+    对 store 采用**函数内惰性 import + try/except 全包裹**：主链不产生任何
+    顶层硬依赖；store 模块缺失、存储损坏、读取异常时一律优雅回退基线，
+    保证零依赖核心在任何环境下都可用。store 单向依赖本模块，无循环风险。
+    """
+    try:
+        # 双路惰性导入：优先 core 包路径（与 store 自身 from core import
+        # state_dir 的编排一致）；回退顶层模块名（core/ 已在 sys.path 的
+        # 编排，如脚本直跑注入 scripts/ 与 core/）。两种编排都兜住。
+        try:
+            from core import learned_anchor_store as _las
+        except Exception:
+            import learned_anchor_store as _las
+
+        if not _las.is_enabled():
+            return _ZH_HIGH_FREQ
+        accepted = _las.active_terms("accept")
+        if not accepted:
+            return _ZH_HIGH_FREQ
+        return _ZH_HIGH_FREQ | frozenset(accepted)
+    except Exception:
+        return _ZH_HIGH_FREQ
 
 _CJK = re.compile(r"[一-鿿]")
 _SENT_SPLIT = re.compile(r"(?<=[。！？!?；;\.\n])|(?<=[。！？!?])")
@@ -116,6 +218,35 @@ def _ngram_freq(text: str, n: int, min_count: int = 2) -> Counter:
     return Counter({k: v for k, v in c.items() if v >= min_count})
 
 
+def _zh_whole_runs(text: str, max_len: int = 4) -> Set[str]:
+    """残片实义片段提取（v1.1.0 锚点掩码配套，精度优先）。
+
+    锚点掩码后连续串被切成多个残片（如「大模型技术正在快速迭代」
+    摘除「大模型」→「技术正在快速迭代」）。不直接整段成词（残片可能
+    含虚词、跨边界），而是**以停用字为切点**，只保留纯实义片段：
+
+      「技术正在快速迭代」→ 按「正在」切 → {技术, 快速迭代}
+      「任务上表现」       → 按「上」切   → {任务, 表现}
+
+    跨词噪声（「任务上表」「正在快速」）因含停用字被切碎，无法整段供给；
+    残片真词则可在 A/B/C 间获得互证。仅收 2-max_len 的纯实义片段。
+    """
+    out: Set[str] = set()
+    for run in _CJK_RUN.findall(text):
+        # 以停用字切段：连续「非停用字」实义子串
+        buf = ''
+        for ch in run:
+            if ch in _ZH_STOP:
+                if 2 <= len(buf) <= max_len:
+                    out.add(buf)
+                buf = ''
+            else:
+                buf += ch
+        if 2 <= len(buf) <= max_len:
+            out.add(buf)
+    return out
+
+
 def _est_zh_ngram(text: str, top: int = 20) -> Set[str]:
     """估计器 A：多粒度 n 元语法词频（2/3/4 字组合）。
 
@@ -129,6 +260,8 @@ def _est_zh_ngram(text: str, top: int = 20) -> Set[str]:
         if not grams:
             grams = _ngram_freq(text, n, min_count=1)
         c.update(grams)
+    # v1.1.0：并入短残片整词（锚点掩码后有效残片供给）
+    c.update(Counter({w: 1 for w in _zh_whole_runs(text)}))
     # 过滤内置停用词与单字噪声已由 _ngram_freq 处理
     return set(_longest_match_suppress(c)[:top])
 
@@ -147,11 +280,14 @@ def _est_zh_position(text: str, top: int = 20) -> Set[str]:
                 if gram in _ZH_STOP or all(ch in _ZH_STOP for ch in gram):
                     continue
                 c[gram] += 1
+    # v1.1.0：head 内短残片整词纳入（锚点掩码配套）
+    c.update(Counter({w: 1 for w in _zh_whole_runs(head)}))
     # 同时要求该候选在全文中也出现过（位置 + 全局双重约束 → 高精度）
     full = (
         set(_ngram_freq(text, 2).keys())
         | set(_ngram_freq(text, 3).keys())
         | set(_ngram_freq(text, 4).keys())
+        | _zh_whole_runs(text)
     )
     cands = [w for w in _longest_match_suppress(c) if w in full]
     return set(cands[:top])
@@ -173,6 +309,7 @@ def _est_zh_docfreq(text: str, top: int = 20) -> Set[str]:
                     if g in _ZH_STOP or all(ch in _ZH_STOP for ch in g):
                         continue
                     grams.add(g)
+        grams |= _zh_whole_runs(s)  # v1.1.0：句内短残片整词
         sent_grams.append(grams)
     # 文档频率
     df = Counter()
@@ -191,6 +328,93 @@ def _est_zh_docfreq(text: str, top: int = 20) -> Set[str]:
                     continue
                 global_freq[g] += 1
     return set(_longest_match_suppress(Counter({g: df[g] for g in cand}))[:top])
+
+
+# ── 词典匹配估计器（v1.1.0：词表式切词锚点，估计器 D）──────────────
+
+def _est_zh_dictionary(text: str, top: int = 20) -> Set[str]:
+    """估计器 D：内置高频词典匹配——在文本/词表中识别已知高频实义词。
+
+    与 A/B/C 的本质差异：不依赖词频重复，**只出现 1 次的专业词也能命中**
+    （n-gram 对单频词全盲，这是长尾/词表输入召回归零的关键缺口）。
+
+    两条匹配通道：
+      1. 连续文本：词典词作为子串扫描（长词优先，最长匹配抑制）；
+      2. 词表输入（空格/标点分隔的短语列表）：分段后整段或段内词典词命中。
+    仅供给候选；是否成为最终关键词由共识投票裁决，避免词典泛匹配噪声。
+    """
+    hits: Set[str] = set()
+    remain = text
+    # 通道 1：按词典词长度降序做子串匹配；命中后从该片段摘除，
+    # 使长词优先（如先「人工智能」再「智能」），天然最长匹配抑制。
+    for w in sorted(_active_zh_anchors(), key=len, reverse=True):
+        idx = remain.find(w)
+        if idx >= 0:
+            hits.add(w)
+            # 摘除命中片段（用空格占位，不破坏其余字符相对位置）
+            remain = remain[:idx] + ('　' * len(w)) + remain[idx + len(w):]
+            if len(hits) >= top:
+                return hits
+    return hits
+
+
+def _est_en_dictionary(text: str, top: int = 20) -> Set[str]:
+    """估计器 D（英文）：内置领域词典匹配（多词短语整体命中）。
+
+    对多词短语（如 "machine learning"）做不区分大小写子串匹配；
+    单词通过 token 集合命中。长短语优先。
+    """
+    low = text.lower()
+    hits: Set[str] = set()
+    # 多词短语优先匹配
+    for phrase in sorted(_EN_HIGH_FREQ, key=lambda p: (p.count(' '), len(p)), reverse=True):
+        if ' ' in phrase and phrase in low:
+            hits.add(phrase)
+            if len(hits) >= top:
+                return hits
+    toks = set(_WORD_EN.findall(text.lower()))
+    for w in _EN_HIGH_FREQ:
+        if ' ' not in w and w in toks:
+            hits.add(w)
+    return hits
+
+
+def _mask_zh_anchors(text: str) -> str:
+    """用词典锚点掩码切分连续中文串（v1.1.0 关键去噪）。
+
+    命中的词典词替换为等长空格，使 n-gram **不跨锚点成串**——
+    根治无 jieba 时「人工智能大模型」被滑出「智能大模/能大模型」
+    这类跨词噪声；统计估计器随后只在锚点外残片上运行。
+    长词优先匹配（与 _est_zh_dictionary 同序），避免短锚点截断长词。
+    """
+    out = text
+    for w in sorted(_active_zh_anchors(), key=len, reverse=True):
+        i = out.find(w)
+        while i >= 0:
+            out = out[:i] + ('　' * len(w)) + out[i + len(w):]
+            i = out.find(w)
+    return out
+
+
+def _mask_en_anchors(text: str) -> str:
+    """英文锚点掩码：命中的领域短语/单词替换为空格（短语优先）。"""
+    low = text.lower()
+    spans: List[Tuple[int, int]] = []
+    for phrase in sorted(_EN_HIGH_FREQ, key=lambda p: (p.count(' '), len(p)), reverse=True):
+        plen = len(phrase)
+        start = low.find(phrase)
+        while start >= 0:
+            end = start + plen
+            # 仅在未被更长锚点覆盖时登记
+            if not any(not (end <= a or start >= b) for a, b in spans):
+                spans.append((start, end))
+            start = low.find(phrase, start + 1)
+    out = list(text)
+    for a, b in spans:
+        for k in range(a, b):
+            if out[k].strip():
+                out[k] = ' '
+    return ''.join(out)
 
 
 def _est_en_tfidf(text: str, top: int = 20) -> Set[str]:
@@ -238,6 +462,46 @@ def redundant_consensus(estimator_sets: Iterable[Set[str]], min_votes: int = 2) 
     return {w for w, v in counter.items() if v >= min_votes}
 
 
+def weighted_consensus(
+    estimator_sets: Sequence[Set[str]],
+    weights: Sequence[float] | None = None,
+    threshold: float | None = None,
+) -> Tuple[Set[str], Counter]:
+    """加权共识投票（v1.1.0 强化版）。
+
+    与等票 `redundant_consensus` 的差异：
+      - 各估计器可带**权重**（词典锚点命中确定性高，但它与 n-gram 证据
+        形态不同，默认略低于「统计证据之间互证」）；
+      - 阈值 `threshold` **自适应**：默认按有效估计器数量取
+        「≥2 票」语义（= 2 个单位权重），并对 2 估计器情形自动收窄，
+        避免短文本（英文 2 估计器）整集通过失去投票意义。
+
+    Args:
+        estimator_sets: 各估计器候选集（空集忽略）。
+        weights: 每个估计器权重；None → 全 1.0。
+        threshold: 通过阈值；None → 自适应（见上）。
+
+    Returns:
+        (共识通过的候选集, 各候选累计加权票 Counter)。
+    """
+    pairs = [(s, w) for i, (s, w) in enumerate(
+        zip(estimator_sets, weights or [1.0] * len(list(estimator_sets)))) if s]
+    if not pairs:
+        return set(), Counter()
+    if len(pairs) == 1:
+        only = set(pairs[0][0])
+        c = Counter({w: pairs[0][1] for w in only})
+        return only, c
+    score: Counter = Counter()
+    for s, w in pairs:
+        for term in s:
+            score[term] += w
+    if threshold is None:
+        # 自适应：≥2 个单位权重；2 估计器时要求两侧互证（阈值=满分-半单位）
+        threshold = 2.0 if len(pairs) >= 3 else sum(w for _, w in pairs) - 0.5
+    return {term for term, v in score.items() if v >= threshold}, score
+
+
 def _est_en_freq(text: str, top: int = 20) -> Set[str]:
     """英文冗余估计器：纯词频（无 IDF），与 _est_en_tfidf 形成双重校验。"""
     toks = [t.lower() for t in _WORD_EN.findall(text)] or []
@@ -246,11 +510,19 @@ def _est_en_freq(text: str, top: int = 20) -> Set[str]:
 
 
 def _optional_jieba(text: str, top: int) -> Set[str]:
-    """可选增强：jieba.textrank（中文友好）。不可用时返回空集。"""
+    """可选增强：jieba.textrank（中文友好）。不可用时返回空集。
+
+    2026-09-29：jieba 探测/初始化统一经 core/jieba_bridge（原裸
+    `import jieba.analyse` 每次调用 try-import；收敛后进程内一次）。
+    """
+    import os as _os
+    import sys as _sys
+    _core = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), 'core')
+    if _core not in _sys.path:
+        _sys.path.insert(0, _core)
     try:
-        import jieba.analyse  # 懒加载：无包则跳过
-        kws = jieba.analyse.textrank(text, topK=top, withWeight=False)
-        return set(kws or [])
+        import jieba_bridge as _jb
+        return _jb.textrank(text, top)
     except Exception:
         return set()
 
@@ -258,6 +530,8 @@ def _optional_jieba(text: str, top: int) -> Set[str]:
 def _optional_summa(text: str, top: int) -> Set[str]:
     """可选增强：summa.keywords（英文友好）。不可用时返回空集。"""
     try:
+        if not _dep_reg().is_available("summa"):
+            return set()
         from summa.keywords import keywords as summa_keywords  # 懒加载
         txt = summa_keywords(text, words=top)
         return {w.strip() for w in (txt or "").split("\n") if w.strip()}
@@ -321,39 +595,78 @@ def extract_keywords_detailed(
         return [(w, 3.0) for w in ranked], ext_engine or "external"
 
     # ── 2) 零依赖共识（最终兜底）────────────────────────────────
-    estimators: List[Set[str]] = []
+    # v1.1.0：估计器从 3 个扩到 **4 个**（+ 词典匹配 D，锚定单频专业词）。
+    # 统计估计器 A/B/C 吃「锚点掩码后文本」：词典锚点处断开连续串，
+    # 杜绝 n-gram 跨词噪声（如「智能大模」）；锚点词由 D 独立供给。
     if lang == "zh":
-        estimators.append(_est_zh_ngram(text, max_kw))
-        estimators.append(_est_zh_position(text, max_kw))
-        estimators.append(_est_zh_docfreq(text, max_kw))
+        masked = _mask_zh_anchors(text)
+        estimators: List[Set[str]] = [
+            _est_zh_ngram(masked, max_kw),
+            _est_zh_position(masked, max_kw),
+            _est_zh_docfreq(masked, max_kw),
+            _est_zh_dictionary(text, max_kw),
+        ]
     else:
-        estimators.append(_est_en_tfidf(text, max_kw))
-        estimators.append(_est_en_freq(text, max_kw))
+        masked_en = _mask_en_anchors(text)
+        estimators: List[Set[str]] = [
+            _est_en_tfidf(masked_en, max_kw),
+            _est_en_freq(masked_en, max_kw),
+            _est_en_dictionary(text, max_kw),
+        ]
 
-    # 共识投票（冗余验证兜底精度）
-    consensus = redundant_consensus(estimators, min_votes=min_votes)
+    # 分层共识合成（v1.1.0 重构：按证据可信度分层，而非全部混投）
+    # 证据可信度：词典锚点（确定性命中）> 多估计器统计互证 > 单估计器单票（噪声）。
+    n_stats = len(estimators) - 1
+    stat_sets = estimators[:n_stats]
+    dict_set = estimators[n_stats]
 
-    vote_count: Counter = Counter()
-    for s in estimators:
+    # 统计层：A/B/C（英文 A/B）等权互证；阈值默认 ≥2 估计器
+    _threshold = None if min_votes == 2 else float(min_votes)
+    stat_consensus, stat_score = weighted_consensus(
+        stat_sets, weights=[1.0] * n_stats, threshold=_threshold)
+
+    # 覆盖估计器数（未加权；排序/置信用）
+    cover: Counter = Counter()
+    for s in stat_sets:
         for w in s:
-            vote_count[w] += 1
+            cover[w] += 1
 
-    if consensus:
-        # 最终精度闸：对共识集再做最长匹配抑制，丢弃被长词包含的短片段
-        # （例：共识含「人工智能/人工智/智能」→ 仅留「人工智能」）
-        consensus = set(_longest_match_suppress(Counter(consensus)))
-        # 高精度子集：按共识票数 + 词长（长词通常更具体）排序
-        ranked = sorted(
-            consensus,
-            key=lambda w: (vote_count[w], len(w)),
-            reverse=True,
-        )[:max_kw]
-        return [(w, float(vote_count[w])) for w in ranked], "zerodep"
+    # ── 层 1：词典锚点——命中即高置信（确定性先验，不需向随机 n-gram 互证）──
+    anchors = set(dict_set)
+    # ── 层 2：统计共识——补「词表外」的多估计器互证词（锚点已含则不重复）──
+    stat_won = set(_longest_match_suppress(Counter(stat_consensus))) - anchors
 
-    # 共识集为空（极短文本/单句）：回退到票数最高候选（召回优先、降权）
-    fallback_terms = _longest_match_suppress(Counter(dict(vote_count)))
-    ranked = sorted(fallback_terms, key=lambda w: vote_count[w], reverse=True)[:max_kw]
-    return [(w, float(vote_count[w]) * 0.5) for w in ranked], "zerodep"
+    # 最终精度闸：合并后整体最长匹配抑制（丢弃被长词包含的短片段）
+    merged_raw = anchors | stat_won
+    merged = set(_longest_match_suppress(Counter({w: 1 for w in merged_raw})))
+
+    if merged:
+        def _rank_key(w):
+            # 锚点优先于统计词；同层按统计覆盖/票数、词长
+            return (0 if w in anchors else 1,
+                    -cover.get(w, 0), -stat_score.get(w, 0.0), -len(w))
+        ranked = sorted(merged, key=_rank_key)[:max_kw]
+
+        # 分层置信（统一 (0, 3] 量纲）：
+        #   锚点 + 统计互证（被统计层也发现）→ 最高 ~2.8
+        #   纯锚点（词表单频，统计层无证据）→ 2.4
+        #   纯统计共识（词表外，跨估计器互证）→ 按覆盖数 ~2.0-2.6
+        out: List[Tuple[str, float]] = []
+        for w in ranked:
+            if w in anchors:
+                conf = 2.8 if cover.get(w, 0) >= 1 else 2.4
+            else:
+                conf = round(min(2.6, 1.6 + 0.4 * cover.get(w, 1)), 3)
+            out.append((w, conf))
+        return out, "zerodep"
+
+    # 无锚点且无统计共识（极短/单句且词表无命中）：召回兜底。
+    # 仅在「完全没有高置信证据」时，取统计层票数最高候选并显著降权 0.5
+    # （保留旧语义；单票噪声与有效残片此层无法区分，故降权交调用方参考）。
+    fallback_terms = _longest_match_suppress(Counter(dict(stat_score)))
+    ranked = sorted(
+        fallback_terms, key=lambda w: (stat_score[w], len(w)), reverse=True)[:max_kw]
+    return [(w, round(float(stat_score[w]) * 0.5, 3)) for w in ranked], "zerodep"
 
 
 def extract_keywords(
@@ -421,5 +734,22 @@ if __name__ == "__main__":
 
     print("\n=== 摘要 ===")
     print("  " + summarize(sample_zh, max_sentences=2))
+
+    print("\n=== 零依赖兜底专项（v1.1.0）===")
+    from unittest import mock as _mock
+    with _mock.patch.object(__import__(__name__), '_optional_jieba', return_value=set()), \
+         _mock.patch.object(__import__(__name__), '_optional_summa', return_value=set()):
+        # 词表输入：单频专业词须被词典锚点召回
+        kz, ez = extract_keywords_detailed(
+            "人工智能 大模型 量化交易", max_kw=5)
+        _kwset = {w for w, _ in kz}
+        assert ez == "zerodep" and {"人工智能", "大模型", "量化交易"} <= _kwset, kz
+        # 掩码去噪：连续文本不得产出跨词噪声
+        kn, _ = extract_keywords_detailed(
+            "人工智能大模型技术正在快速迭代。大模型在自然语言处理任务上表现突出。",
+            max_kw=8)
+        _noise = [w for w, _ in kn if "大模" in w and w != "大模型"]
+        assert not _noise, f"跨词噪声={_noise}"
+        print("  锚点召回 + 掩码去噪 断言通过")
 
     print("\n[OK] 零依赖核心在纯标准库下运行成功，无需任何 pip 安装。")

@@ -36,6 +36,10 @@ INFOSEEK_ROOT = Path(os.environ.get('INFOSEEK_ROOT', str(Path(__file__).parent.p
 CORE_DIR = INFOSEEK_ROOT / 'core'
 sys.path.insert(0, str(CORE_DIR))
 sys.path.insert(0, str(INFOSEEK_ROOT))
+sys.path.insert(0, str(INFOSEEK_ROOT / 'scripts'))
+
+# G8-apply: 公共入口类型契约守卫（纯 stdlib，scripts/entry_guard.py）
+from entry_guard import (require_text, require_mapping, require_sequence, coerce_mapping_list)
 
 from core.ner import extract_entities
 from core.entities import get_entities_by_type, entity_count
@@ -183,7 +187,7 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
             'trust_bonus': 0-42,         # = trust_bonus_base + kb_bonus（字段归属沿用 v1.7.2 契约）
             'trust_bonus_base': 0-30,    # 纯信任源加权（v1.8.3 拆分，与链A trust_bonus 同口径）
             'kb_bonus': 0-12,            # KB 交集加权（v1.8.3 拆分，与链A domain_bonus 内 KB 段同源）
-            'domain_bonus': 0-20,        # 领域加权（**仅报告不计入 final**，见下方口径声明）
+            'domain_bonus': 0-20,        # 领域特定信任段（v2.3.2 收口：经聚合真源计入 final）
             'xling_bridge': 0-70,        # 跨语言别名桥接分（v1.9.0 GA10 新增，向后兼容；仅 semantic_fallback 路径非零）
             'after_decay': float,        # 衰减后中间量（v1.8.3 新增，对齐链A）
             'decay_factor': float,       # 衰减因子（v1.8.3 新增）
@@ -192,11 +196,14 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
             'version': '1.2.0',          # algo-v：下游契约稳定，不随 skill 版本变动
         }
 
-    **domain_bonus 口径声明**：链B 的信任源与 KB 交集加分已全部经 `trust_bonus` 进入
-    聚合，故 `domain_bonus` 字段（来自 `source['_scoring']` 旁路）**不再重复计入 final**，
-    避免双重计分；链A 的 domain_bonus 计入 final（其 trust_bonus 不含 KB 段）。
-    两侧 KB 加分**数值同源**（均出自 `domain_router.kb_intersect_bonus`），仅字段归属不同。
+    **domain_bonus 口径声明（v2.3.2 收口）**：链B 的 `domain_bonus` = 纯领域特定信任段
+    `domain_router.trust_source_bonus(source, profile)`，与链A 同源，经 `aggregate_score_v2`
+    **计入 final**。KB 交集加分仍在 `trust_bonus`（= trust_bonus_base + kb_bonus），**不进入
+    domain_bonus**，故无双重计分。领域段与 KB 段分别取分，组件口径与链A 一致；
+    `source['_scoring']` 旁路值不再被采信（防旁路口径与真源分叉）。
     """
+    # G8-apply: 类型契约守卫（拒绝 None/list/str 等非映射 → 受控 TypeError，替代 .get 崩溃）
+    require_mapping(source, "source")
     # 0) base 三态入口（base_origin 可观测）
     raw_score = source.get('score', 0)
     # P0-OPEN-04 + P1(DEF-08/DEF-09)：入口类型保护 + 量纲归一化。
@@ -304,13 +311,26 @@ def score_source(source: Dict, subject: str, with_domain: bool = True,
         except (TypeError, ValueError):
             _days = 0
 
-    # 5) 领域加权（旁路字段，仅报告不计入 final —— 见 docstring 口径声明）
-    domain_bonus = source.get('_scoring', {}).get('domain_bonus', 0)
+    # 5) 领域特定信任段（收口 v2.3.2：纯领域 trust_source_bonus 经 domain_bonus
+    #    进入聚合真源；KB 段已在 trust_bonus，故此处只算领域特定段，防双重计分）
+    domain_bonus = 0
+    try:
+        from domain_router import trust_source_bonus, load_profile
+        _profile = domain_profile
+        if _profile is None and domain and domain != 'general':
+            try:
+                _profile = load_profile(domain)
+            except Exception:
+                _profile = None
+        if _profile is not None:
+            domain_bonus = int(trust_source_bonus(source, _profile) or 0)
+    except Exception:
+        domain_bonus = 0
 
     # 6) 聚合（唯一真源，禁止自算公式）
     try:
         agg = aggregate_score_v2(base_score, days_since_published=_days,
-                                 trust_bonus=trust_bonus, domain_bonus=0)
+                                 trust_bonus=trust_bonus, domain_bonus=domain_bonus)
         final = agg['final_score']
         classification = agg['classification']
         extra = {'after_decay': agg['after_decay'],
@@ -399,6 +419,8 @@ def detect_conflicts(sources: List[Dict], subject: str = '') -> Dict:
     1. 实体感知：先抽实体，按实体分组冲突
     2. 实体相似度：跨语言实体匹配（如 OpenAI ↔ openai ↔ OPENAI）
     """
+    # G8-apply: 类型契约守卫（拒绝非序列/str → 受控 TypeError，替代 dict 迭代出键后 .get 崩溃）
+    require_sequence(sources, "sources")
     # v1.9.0 GA9④：人名实体引导（直接调用冲突检测工具时也保证 person 实体族可见）
     _bootstrap_persons(subject)
 
@@ -456,6 +478,8 @@ def render_report(subject: str, sources: List[Dict],
     返回:
         格式化报告字符串
     """
+    # G8-apply: 元素级坏源隔离（[None] 等坏元素跳过 + warning，保留整链存活）
+    sources = coerce_mapping_list(sources, "sources", skip_bad=True)
     sys.path.insert(0, str(INFOSEEK_ROOT / 'scripts'))
     try:
         from domain_orchestrator import DomainOrchestrator
@@ -702,13 +726,16 @@ def research(subject: str,
         }
         # v2.4.0: 语义矛盾打分（给每对冲突附 semantic_score）
         try:
-            from contradiction_scorer import score_contradiction
+            from contradiction_scorer import score_contradiction_hybrid
             enriched = []
+            _llm_used_n = 0
             verdict_counts = {'conflict': 0, 'no_conflict': 0,
                               'not_assessable': 0}
             time_cov_counts = {'both_timed': 0, 'partial': 0, 'neither': 0}
             for c in result['conflicts']:
-                sc = score_contradiction(c['claim_a'], c['claim_b'])
+                sc = score_contradiction_hybrid(c['claim_a'], c['claim_b'])
+                if sc.get('llm_used'):
+                    _llm_used_n += 1
                 c2 = dict(c)
                 c2['semantic_score'] = sc['score']
                 c2['severity'] = sc['severity']  # 用语义评覆盖中等/高严重度
@@ -725,7 +752,7 @@ def research(subject: str,
                             'event_slot_keys', 'period_pair_details',
                             'period_disjoint_slots', 'period_overlap_slots',
                             'llm_time_suppressed', 'llm_time_suppressed_slots',
-                            'scorer_mode'):
+                            'scorer_mode', 'llm_used', 'llm_error'):
                     if _fk in sc:
                         c2[_fk] = sc.get(_fk)
                 verdict_counts[sc.get('verdict', 'not_assessable')] = \
@@ -742,7 +769,10 @@ def research(subject: str,
                 'enabled': True,
                 'version': '1.3.0',
                 'scored': _scored,
-                'method': 'local',   # 默认本地分（LLM 增强待后续接入）
+                # method 随 hybrid 状态动态化：env INFOSEEK_CONTRADICTION_LLM
+                # 开启且实际命中 LLM 槽时标 llm_hybrid，否则纯本地键控
+                'method': 'llm_hybrid' if _llm_used_n else 'local',
+                'llm_augmented': _llm_used_n,
                 'verdict_counts': verdict_counts,
                 'time_coverage_counts': time_cov_counts,
                 # 可评估率：有可对拍事实槽的对比对占比（其余为未评估，非"无冲突"）
@@ -896,11 +926,16 @@ async def async_research(subject: str,
         async def _conflict_v3():
             try:
                 from conflict_v3 import detect_conflicts_v3
-                from contradiction_scorer import score_contradiction
+                from contradiction_scorer import score_contradiction_hybrid
                 v3 = await asyncio.to_thread(detect_conflicts_v3, sources, subject)
                 enriched = []
+                _llm_used_n = 0
                 for c in v3.get('conflicts', []):
-                    sc = score_contradiction(c['claim_a'], c['claim_b'])
+                    # hybrid 内 LLM 为同步阻塞调用，整体放 to_thread 避免阻塞事件循环
+                    sc = await asyncio.to_thread(
+                        score_contradiction_hybrid, c['claim_a'], c['claim_b'])
+                    if sc.get('llm_used'):
+                        _llm_used_n += 1
                     c2 = dict(c)
                     c2['semantic_score'] = sc['score']
                     c2['severity'] = sc['severity']
@@ -917,7 +952,7 @@ async def async_research(subject: str,
                                 'event_slot_keys', 'period_pair_details',
                                 'period_disjoint_slots', 'period_overlap_slots',
                                 'llm_time_suppressed', 'llm_time_suppressed_slots',
-                                'scorer_mode'):
+                                'scorer_mode', 'llm_used', 'llm_error'):
                         if _fk in sc:
                             c2[_fk] = sc.get(_fk)
                     enriched.append(c2)
@@ -935,7 +970,8 @@ async def async_research(subject: str,
                         'enabled': True,
                         'version': '1.2.0',
                         'scored': len(enriched),
-                        'method': 'local',
+                        'method': 'llm_hybrid' if _llm_used_n else 'local',
+                        'llm_augmented': _llm_used_n,
                     },
                 }
             except Exception as e:
@@ -1192,7 +1228,7 @@ async def streaming_research(subject: str,
                                 'event_slot_keys', 'period_pair_details',
                                 'period_disjoint_slots', 'period_overlap_slots',
                                 'llm_time_suppressed', 'llm_time_suppressed_slots',
-                                'scorer_mode'):
+                                'scorer_mode', 'llm_used', 'llm_error'):
                         if _fk in sc:
                             c2[_fk] = sc.get(_fk)
                     enriched.append(c2)

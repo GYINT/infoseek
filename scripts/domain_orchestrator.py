@@ -28,6 +28,20 @@ from typing import Optional
 WORKSPACE = Path(os.environ.get('OPENCLAW_WORKSPACE', str(Path.home() / 'infoseek')))
 INFOSEEK_ROOT = Path(os.environ.get('INFOSEEK_ROOT', str(Path(__file__).parent.parent)))
 
+# ── S7：dep_registry 事实层惰性 accessor（外部依赖可用性统一求值，零漂移）──
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _cand = Path(__file__).resolve().parent.parent / "core"
+        if str(_cand) not in sys.path:
+            sys.path.insert(0, str(_cand))
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 
 def _excerpt(text, limit: int = 600) -> str:
     """正文摘要（P2 内容链中枢字段）：压缩空白/换行 → 取前 limit 字符
@@ -397,6 +411,8 @@ class DomainOrchestrator:
         等脏上下文) → _render_simple 简单替换 → 再失败 → _render_fallback 兜底列表。
         """
         try:
+            if not _dep_reg().is_available("Jinja2"):
+                return self._render_simple(template_text, context)
             from jinja2 import Template
             tmpl = Template(template_text)
             return tmpl.render(**context)

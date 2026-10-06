@@ -45,7 +45,6 @@ import json
 import logging
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +68,19 @@ except ImportError:  # 直接运行时兜底
 
 CAP_NAME = "Maigret"
 
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _core = str(pathlib.Path(__file__).resolve().parent.parent / "core")
+        if _core not in sys.path:
+            sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
+
 # top-sites 受控上限：默认只扫高排名站点以控耗时/降误报。
 # 注意 maigret 对过小值会钳制（实测 min≈10）；显式全量须 recursive/调用方指定。
 DEFAULT_TOP_SITES = 100
@@ -80,7 +92,7 @@ def _resolve_cli() -> List[str]:
     返回命令片段（list，如 ['/venv/bin/maigret'] 或 ['/venv/python','-m','maigret']），
     调用方以 cli + [username, ...] 拼接，避免 Windows 模块式回退出现含空格的单字符串。
     """
-    cli = shutil.which("maigret")
+    cli = _dep_reg().which_path("maigret")
     if cli:
         return [cli]
     venv = os.environ.get("INFOSEEK_MAIGRET_VENV")

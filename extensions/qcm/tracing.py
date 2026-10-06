@@ -23,10 +23,25 @@
       raise
 """
 import os
+import sys
 import time
 import json
 import uuid
+import pathlib
 from typing import Dict, Optional, Any
+
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _core = str(pathlib.Path(__file__).resolve().parents[2] / "core")
+        if _core not in sys.path:
+            sys.path.insert(0, _core)
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
 
 # ============ 轻量 span 实现（不依赖 OTel SDK · 格式兼容）============
 class Span:
@@ -91,6 +106,8 @@ def _init_provider() -> bool:
     _PROVIDER_INITIALIZED = True
 
     try:
+        if not _dep_reg().is_available("opentelemetry"):
+            raise ImportError("opentelemetry unavailable")
         from opentelemetry import trace as otel_trace
         from opentelemetry.sdk.trace import TracerProvider as OTelTracerProvider
         from opentelemetry.sdk.trace.export import SimpleSpanProcessor, ConsoleSpanExporter

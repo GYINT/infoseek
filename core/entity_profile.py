@@ -15,6 +15,7 @@ CLI:
 
 import sys
 import json
+import re
 import datetime
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -66,17 +67,20 @@ class EntityProfile:
             print(f"[entity_profile] 保存失败: {e}")
 
     def _extract_topics(self, text: str, limit: int = 5) -> List[str]:
-        """从文本提取主题关键词（jieba 优先，兜底简单切分）"""
+        """从文本提取主题关键词（jieba 优先，兜底简单切分）
+
+        2026-09-29：jieba 探测统一经 jieba_bridge（进程内缓存；
+        原实现每次调用裸 try-import）。
+        """
         topics = []
-        try:
-            import jieba
-            words = jieba.lcut(text)
+        import jieba_bridge as _jb
+        words = _jb.lcut(text)
+        if words is not None:
             # 过滤：长度≥2 的实词
             stop = {'公司', '集团', '发布', '模型', '技术', '合作', '研究', '市场', '报告', '数据'}
             topics = [w for w in words if len(w) >= 2 and w not in stop][:limit]
-        except Exception:
+        else:
             # 兜底：按空白/标点切分
-            import re
             words = re.split(r'[\s,，。;；:：]+', text)
             topics = [w for w in words if len(w) >= 2][:limit]
         return topics

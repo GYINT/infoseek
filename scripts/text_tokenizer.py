@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-text_tokenizer.py — 全仓唯一分词真源（GA5 分词单源化 / v1.8.4）
+text_tokenizer.py — 全仓唯一分词真源（GA5 分词单源化 / mod-v1.1.0）
 
 治理动机
 --------
-v1.7.8 起同一套「jieba 优先 → 缺失回退纯 Python」分词逻辑存在**两份独立实现**：
+早期版本起同一套「jieba 优先 → 缺失回退纯 Python」分词逻辑存在**两份独立实现**：
   - `anchor_adapter._tokenize_subject`   —— 词级命中率口径（P1#4）
   - `infoseek_pipeline._tokenize_query`  —— 相关性门控多字词硬门槛（P0#2）
-v1.8.2 仅做「回退算法对齐」（split → findall，消除中英混合串跨边界 2-gram 噪声），
+中间版本仅做「回退算法对齐」（split → findall，消除中英混合串跨边界 2-gram 噪声），
 两份代码仍并存 → ROADMAP **GA5「分词单源化」保持开放**，任一侧口径调整都可能再次漂移
 （审计 P1-1「同算法」声明曾被实测证伪：6 样本 3 分叉）。
+历史版本演进与各轮 mod-v 见 CHANGELOG。
 
 本模块把该算法收敛为唯一实现 `tokenize_text()`，两侧退化为薄封装委托：
   - `_tokenize_subject(s)`  → `tokenize_text(s)`
@@ -34,13 +35,25 @@ v1.8.2 仅做「回退算法对齐」（split → findall，消除中英混合�
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
+from pathlib import Path
 
 __all__ = ['tokenize_text', 'has_chinese', 'MOD_VERSION']
 
-MOD_VERSION = '1.0.0'
+MOD_VERSION = '1.1.0'
 
 log = logging.getLogger(__name__)
+
+# ── jieba 探测/告警统一经 core/jieba_bridge（2026-09-29 六处裸 import 收敛）──
+# 原模块内 _JIEBA/_JIEBA_PROBED/_FALLBACK_WARNED 三套状态删除；bridge 进程内
+# 探测一次、降级永不抛错。core 路径在导入期就绪（幂等，不膨胀 sys.path——
+# 仅插入一次，且在模块加载期而非热路径，规避 GA8 的 O(n²) 教训）。
+_CORE = str(Path(__file__).parent.parent / 'core')
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
+import jieba_bridge as _jb  # noqa: E402  顶层名 ↔ core.jieba_bridge 经 sys.modules 双登记合一
 
 # ── 口径常量（单源；调整此处即全局生效） ────────────────────────────
 _CHN = r'[\u4e00-\u9fff]'
@@ -50,10 +63,8 @@ _CHN_RE = re.compile(_CHN)
 _MIN_WORD_LEN = 2        # 最短词长（杜绝单字噪音，如「新（汉语汉字）」）
 _CHN_WHOLE_SEG_MAX = 4   # 中文连续段 ≤ 此长度整段成词，否则切 2-gram
 
-# ── 进程内探测/告警状态 ────────────────────────────────────────────
-_JIEBA = None            # 可用时为 jieba 模块对象
-_JIEBA_PROBED = False    # 是否已探测（避免重复 try-import）
-_FALLBACK_WARNED = False # 回退告警是否已发（一次性）
+# ── 进程内探测/告警状态已收口至 jieba_bridge（2026-09-29）────────────
+# 探测/初始化/一次性告警全部委托 bridge；本模块仅保留纯 Python 回退算法。
 
 
 def has_chinese(text: str) -> bool:
@@ -62,25 +73,13 @@ def has_chinese(text: str) -> bool:
 
 
 def _probe_jieba():
-    """探测 jieba 可用性（进程内一次；不可用返回 None）。"""
-    global _JIEBA, _JIEBA_PROBED
-    if not _JIEBA_PROBED:
-        try:
-            import jieba
-            _JIEBA = jieba
-        except Exception:
-            _JIEBA = None
-        _JIEBA_PROBED = True
-    return _JIEBA
+    """委托 bridge 探测 jieba（保留名字以向后兼容既有调用点/测试）。"""
+    return _jb.get_jieba()
 
 
 def _warn_fallback_once() -> None:
-    """jieba 缺失一次性告警（原 pipeline._RELEVANCE_WARNED 语义迁移至此）。"""
-    global _FALLBACK_WARNED
-    if not _FALLBACK_WARNED:
-        log.warning("[tokenizer] jieba 未安装 → 回退纯 Python 分词"
-                    "（多字词精度下降；建议 pip install jieba）")
-        _FALLBACK_WARNED = True
+    """委托 bridge：jieba 缺失一次性告警。"""
+    _jb.warn_jieba_once()
 
 
 def _fallback_tokens(text: str) -> set:
@@ -119,13 +118,10 @@ def tokenize_text(text: str, require_chinese: bool = False,
     if require_chinese and not has_chinese(text):
         return set()
 
-    jieba = _probe_jieba()
-    if jieba is not None:
-        try:
-            return {w.strip().lower() for w in jieba.lcut(text)
-                    if len(w.strip()) >= _MIN_WORD_LEN}
-        except Exception:
-            pass  # jieba 运行期异常（词典损坏等）→ 回退纯 Python
+    words = _jb.lcut(text)
+    if words is not None:
+        return {w.strip().lower() for w in words
+                if len(w.strip()) >= _MIN_WORD_LEN}
 
     if warn_on_fallback:
         _warn_fallback_once()

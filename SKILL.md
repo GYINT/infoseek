@@ -1,6 +1,6 @@
 ---
 name: infoseek
-version: 2.2.0
+version: 2.6.0
 description: 端到端内容智能采集与调研工作流。从行业/主题/人名/公司输入开始，自动嗅探信息源、按可信度+主题一致性+互动深度+LLM可读性四维评分门控、深度抓取（4级降级：静态/渲染/凭证/多媒体）、搜索引擎全生命周期管理（健康/配额/新鲜度自愈）、QVeris 能力路由、统一能力注册表（consent 闸控）、语义矛盾检测（共享事实槽+否定词典+极性放大）、实体识别（95+实体+多语种+别名归并+人名消歧动态注册）、召回增强（别名扩展/多样性合并/自适应门槛/跨语言别名桥接）、跨源融合分析，最终输出结构化 Markdown 报告，可选自动归档。适用：行业调研、趋势分析、竞品分析、市场研究、技术研究、内容采集、报告生成、长期知识库建设。不适用：实时新闻监控、学术文献综述、浏览器自动化爬取、即时聊天对话
 license: MIT
 ---
@@ -68,7 +68,7 @@ async for partial in streaming_research("DeepSeek V3", lite=True):
     print(partial["step"], "...")  # score_complete / wikidata_complete / ...
 ```
 
-### 2.2 MCP 工具调用（17 规范工具 + 12 兼容并存）
+### 2.2 MCP 工具调用（18 规范工具 + 12 兼容并存）
 
 | 类别 | 工具数 | 用途 |
 |------|--------|------|
@@ -282,7 +282,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 
 - **R06**（程序化缺失）→ degradation_router 日志告警
 - **R11**（DuckDuckGo API 限流）→ 限速 + 429 熔断 + Wikipedia 兜底
-- **R14**（无单元测试）→ 25 套件全绿（聚合入口 tests/run_tests.py）
+- **R14**（无单元测试）→ 86 标准套件全绿（聚合入口 tests/run_tests.py）
 - **R05**（名称搜索单引擎）→ 搜索引擎降级链 + 引擎生命周期自愈
 
 ---
@@ -290,7 +290,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 ## 6. 兼容性
 
 - **0 破坏性变更**：历史 API 完整保留，同步 `research()` 兼容并存
-- **MCP 工具**：17 规范工具 + 12 兼容并存期工具（附 `deprecated` 标记）
+- **MCP 工具**：18 规范工具 + 12 兼容并存期工具（附 `deprecated` 标记）
 - **运行时数据**：状态文件（claims/aliases/engine_state 等）落 `~/.infoseek/`（`INFOSEEK_DATA_DIR` 可覆盖），技能更新不丢数据
 - **升级方式**：备份 → 替换目录 → 运行 `python tests/run_tests.py` 验证
 
@@ -332,7 +332,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 |------|------|------|
 | README | `README.md` | 快速导航 + 5 秒看懂 |
 | RELEASE_NOTES | `RELEASE_NOTES.md` | 版本发布说明 |
-| 核心库 | `core/` | 22 功能模块（实体 / 评分 / 矛盾 / 爬取等；运行时数据经 state_dir 落 `~/.infoseek`） |
+| 核心库 | `core/` | 30 功能模块（实体 / 评分 / 矛盾 / 爬取等；运行时数据经 state_dir 落 `~/.infoseek`） |
 | 适配层 | `scripts/` | MCP server 门面 + 工具模块 + keys CLI（16 子命令）+ 引擎生命周期 + 引擎健康探测 + perf 基准 + 符号自检 |
 | 引用契约 | `references/` | 契约文档 + trusted-sources.json + configuration + external-deps + api-keys + ROADMAP |
 | 报告模板 | `domains/templates.yaml` | 5 领域模板 + default（块标量合并） |
@@ -363,7 +363,7 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
 
 ## 10. 测试与质量
 
-- **测试套件**：26 个测试文件（脚本风格，聚合入口 `tests/run_tests.py`；勿用 pytest——顶层 sys.exit 会导致 INTERNALERROR）
+- **测试套件**：87 个测试文件（`run_all.py` 全发现；`run_tests.py` 排除 `test_deep_v101` → 86 标准套件）（脚本风格，聚合入口 `tests/run_tests.py`；勿用 pytest——顶层 sys.exit 会导致 INTERNALERROR）
   - 核心与质量维度：`test_infoseek_v231/v240` / `test_boundary` / `test_compat` / `test_correctness` / `test_reliability` / `test_security` / `test_stability`
   - 端到端：`test_e2e_scenarios_v240.py`
   - 流式与异步：`test_streaming_v300.py` / `test_async_tools.py`
@@ -372,9 +372,9 @@ RPN Top 风险已实施工程控制（详见 `references/risk-register.md`）：
   - 生命周期与协同：`test_engine_lifecycle_v101.py`（40 用例）/ `test_qcm_bridge_v101.py` / `test_key_manager_v101.py`（29 用例）
   - v1.2 新套件：`test_freshness_cron_v101.py`（23）/ `test_recall_enhance_v101.py`（16）/ `test_fetch_levels_v101.py`（26）
   - 深度测试：`test_deep_v101.py`（单独运行）
-- **运行方式**：`python tests/run_tests.py`（25 标准套件）或逐个直跑；深度 `python tests/test_deep_v101.py`
+- **运行方式**：`python tests/run_tests.py`（86 标准套件）或逐个直跑；深度 `python tests/test_deep_v101.py`
 - **质量门控**：边界 / 兼容 / 正确性 / 可靠性 / 安全性 / 稳定性 6 维度全覆盖
-- **质量基线**：`dist/quality_baseline.json`（v1.2.0，26/26 套件 all_ok）
+- **性能基线**：`dist/perf_baseline_v101.json` + `dist/perf_profile_v101.json`（v2.2.0 多轮采样；见 P2-6/D-3）
 
 ---
 

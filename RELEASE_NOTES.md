@@ -1,3 +1,193 @@
+# Infoseek v2.6.0 发布说明
+
+> 发布日期：2026-10-06 ｜ 版本：**2.6.0**（NER 性能优化：Aho-Corasick 自动机替代正则扇出，research 提速约 2.3×）｜ 许可证：MIT
+
+---
+
+## 本次更新（v2.6.0）
+
+性能专项四阶段 A→B→C→D，针对 cProfile 定位的全链第一热点——NER `_match_entity` 正则扇出（292146 次 / cum 11.546s）：
+
+- **A 快速收益**：EntityAliases 模块级单例 + NER 结果缓存，消除重复初始化与重复 NER。
+- **B 静态预算重构**：normalize/边界正则预编译、实体归一化预算按 id 缓存并以指纹失效。
+- **C1 热点正则预编译（不引新库）**：正则对象复用。
+- **C2 Aho-Corasick（pyahocorasick，唯一新引入依赖）**：name/static alias/hot/cold 动态别名统一 6 元组负载，一次自动机扫描替代逐实体逐别名正则扇出；未命中实体才补跑动态别名正则。pyahocorasick 缺失或构建失败静默回退原正则路径（`INFOSEEK_AC_DISABLE=1` 可关），结果语义不变。
+
+**性能效果**（perf_baseline_v101，scale 1000 / rounds 3）：
+- extract_entities cum 24.963s → 9.873s（约 2.5×）；正则扇出由 29 万次降至近 0。
+- 冲突检测 P50 16.9s → 6.1s（约 2.8×）；research(2k lite) P50 57.4s → 25.2s（约 2.3×）。
+- NER 不再是第一热点，新热点为 entity_tracker 高频 JSON 落盘（既有机制，本次不动）。
+
+**验证**：新增守护 tests/test_aho_corasick_c2.py（29 断言）；A/B/C 每阶段全量回归 85 PASS / 0 FAIL；冒烟 + 动态别名双验证通过。
+
+---
+
+## 历史版本
+
+### v2.5.0（2026-10-05，意图槽门控堵主题漂移 + L2 渲染恢复实测）
+
+中文长尾实网对拍暴露：360/Kimi/天工召回结果中混入大量同实体**主题漂移页**（旅游攻略/百科/文旅新闻），旧相关性门控的边缘分与 floor/top-k 保底机制将其漏出为「相关结果」。
+
+核心修复（方向 B，pipeline mod-v1.5.0）：
+- **意图槽门控**：7 组意图触发词（价格/收购/产量/行情/排名/教程/厂家），主门槛、floor 保底、二级 top-k **三路径统一过槽**。
+- **trade 同族归并**：价格/收购/行情同属交易族，簇内任一词回显即过，避免误杀只写「收购」不写「价格」的真相关页；跨族（排名/教程/厂家）仍须各自回显。
+- **图谱邻域意图感知**：带意图长尾 query 默认跳过图谱邻居，杜绝邻域引入跨主题扩展；`INFOSEEK_RECALL_GRAPH_INTENT=1` 可恢复。
+- **异常安全**：过滤异常返回 `[]`，不裸返全量。
+
+方向 A（L2 渲染恢复，实测负结果、能力保留）：
+- 恢复系统 chromium + playwright + stealth，sannysoft 31 项检测全过；但实测 360 数据中心 IP 滑块墙、Kimi/天工需登录且 URL 未承接查询，渲染对当前端点增益=0，能力保留供未来住宅 IP 部署。
+
+**验证**：新增守护 23 断言；实网对拍「信阳板栗最新收购价格」主题漂移漏出 3→0、真相关页全部保留；既有套件零回归。
+
+---
+
+# Infoseek v2.4.1 发布说明
+
+> 发布日期：2026-10-04 ｜ 版本：**2.4.1**（GA12 薄壳漏标修复：品牌官网首页壳判定 + 防误杀三门控）｜ 许可证：MIT
+
+---
+
+## 本次修复（v2.4.1）
+
+中文长尾搜索实测暴露：Kimi 探索版、天工 AI 两个准官方端点在静态抓取时返回**根域名 SPA 官网首页**（通用营销文案、与查询无关），旧判定仅承认标题精确等于「首页/官网」，Kimi 标题只含「官网」、天工不含，均绕过而被当作有效结果召回（薄壳漏标）。
+
+修复要点：
+- **判定分层**：captcha/login 静态即拦（浏览器穿不透）；thin_home 延后到渲染尝试之后对最终页补判，不短路 L2 渲染门控。
+- **三重防误杀**：查询词回显 / 正文含结果列表结构词，均不判；仅标题命中品牌强壳词（正文可长）或通用官网词（正文须 <600）才判 thin_home。
+- 真实三端点对拍：360 `captcha`、Kimi/天工 `thin_home` 全部正确降级并提示人工核验，真实结果页零误杀。
+
+回归：全量 **84 PASS / 0 FAIL**（229s），D-6 文档守护 29/29。
+
+---
+
+## v2.4.0 历史说明
+
+> 前置：v2.3.3。MINOR 定级：主链路新增长尾中文路由能力（默认 ON，仅对判定为长尾中文的 query 生效），影响 `scripts/infoseek_pipeline.py`（mod-v1.2.1→1.3.0）、新增 1 测试套件与 1 验收台账（变动量 >30% 于长尾召回路径，整体 <30%）。
+
+## v2.4.0 核心改动
+
+### ① P1-CN2 CJK query 中文引擎优先路由
+- 长尾中文 query（CJK 字数 ≥6）在 `_default_layer` 中把 CN-AI-Web（360AI搜/Kimi探索版/天工AI）**前置**为首位引擎，优先于通用/国际引擎。
+- `_engine_weight_for` 对长尾中文给 CN-AI-Web 权重加帽：基础 0.3 → 封顶 1.0（独立于 DYN_WEIGHT 动态权重），融合排序时中文结果居首。
+- 保留通用/国际引擎作兜底；`INFOSEEK_CN_PRIORITY=0` 可回退到旧顺序（CN 居末尾、权重 0.3）。
+
+### ② P1-CN3 长尾中文评估基准
+- 新增 `tests/test_longtail_cn_benchmark_cn3.py`（46 断言，全离线、不触网），覆盖 A/B/C/D 四层退化：
+  A 召回退化（中文前置）、B 融合权重（0.3→1.0 封顶）、C 短中文/英文不误杀、D jieba 屏蔽仍判长尾、D+ CN4 netguard 行为。
+- 验收台账 `references/cn3-longtail-benchmark-ledger.md`。真实网络环境受沙箱所限，基准为内部契约级，不代表真实召回质量。
+
+### ③ P1-CN4 部署侧网络边界兜底
+- `_search_cn_web` 调用非官方端点前先经 `net_probe.check_hosts` 预判，过滤不可达 host（`INFOSEEK_CN_NETGUARD` 默认 ON）。
+- 探测本身异常时**保守保留全部端点**不崩；逐端点 try/except，单点失效不污染主链。
+
+---
+
+# Infoseek v2.3.3 发布说明
+
+> 发布日期：2026-10-01 ｜ 版本：**2.3.3**（矛盾检测事实槽召回增强 + research 全链路性能优化）｜ 许可证：MIT
+> 前置：v2.3.2。PATCH 定级：新增主链路能力（默认 OFF 零行为变化）+ 热路径性能改动，影响 core/contradiction_scorer.py、scripts/infoseek_core_v2.py、core/ner.py、references/contradiction-synonyms.json（变动量 10–30%）。
+
+## v2.3.3 核心改动
+
+### ① 矛盾检测长叙述句事实槽召回增强（P2-4）
+- **B 层 LLM 结构化槽 hybrid `score_contradiction_hybrid` 正式接线**（此前为孤儿函数）：
+  同步路 `score_contradiction` 与异步路 `score_contradiction_async`（经 `asyncio.to_thread`）均接入；
+  默认 OFF 返回值 == base（逐字段零漂移），env `INFOSEEK_CONTRADICTION_LLM=1` 开启。
+  LLM 出槽走「方面归一化 + 极性/数值/时间/枚举」冲突判定，解决长叙述句键控召回稀疏。
+- **方面簇词典 `references/contradiction-synonyms.json` v1.1.0 → v1.2.0**：24 → 36 簇，
+  新增 production_output/capacity/user_scale/cost/margin_rate/growth_rate/rank/policy_stance/debt/cash/dividend/time_point 12 簇；
+  zh 词条 160 → 267；既有 revenue/profit/market_share 等 6 簇补词。
+
+### ② research 全链路性能优化（P2-6）
+- **根因**：NER 在逐源热路径对每个实体名/别名无缓存重复 `re.escape + re.compile`，
+  `re._compile` tottime 19.6s 居融合阶段首位，`extract_entities` cum 87.1s（占 research ~60%）。
+- **修法**：`core/ner.py _boundary_pattern` 加模块级 Pattern 缓存（编译结果只依赖归一化 keyword，与 text 无关，缓存安全）。
+- **实测（3000 源 ×1 轮）**：research **262.5s → 115.4s（-56%，2.27×）**；冲突 124.3s → 48.9s（-61%）；
+  `re._compile` 19.6s → 5.3s（-73%）。评分阶段持平（53s）。
+
+### ③ domain_bonus 口径收口复核（P2-5）
+- 确认 v2.3.2 已将三链路口径旁路字段 `domain_bonus` 统一并入 `aggregate_score_v2()`（链 A `anchor_score_v2` / 链 B `infoseek_core_v2.score_source`），
+  降级保底不平行自算、只标 `_aggregate_degraded`；守护测试 `test_domain_bonus_no_double_count.py` ALL PASS，无双重计分。
+
+### ④ G8-apply 口径销账（P2-2）
+- G8 入口契约守护（脚本式测试 `tests/test_entry_contract_g8.py`）实跑 21 PASS / 0 FAIL；
+  ROADMAP G8 收口行与 G8-apply 接线行查实，无遗留口径矛盾。
+
+---
+
+# Infoseek v2.3.2 发布说明
+
+> 发布日期：2026-09-30 ｜ 版本：**2.3.2**（S6/S7：浏览器探测收口 + 外部依赖消费点统一迁移到 dep_registry）｜ 许可证：MIT
+> 前置：v2.3.1。PATCH 定级：**行为保持型重构**（零逻辑变更、收口前后逐点零漂移对拍），仅将分散探测统一求值，影响 11 文件（变动量 10–30%）。
+
+## v2.3.2 核心改动
+
+### ① S6 浏览器探测收口
+- **`scripts/l2_renderer.py`**（mod-v 不变）：chromium / chromium-headless-shell / playwright / camoufox / patchright
+  的 `path:` 求值改经 `core/dep_registry.py` 统一接口（`has_module` / `which_path`），组合与降级逻辑仍留本层；
+  camoufox 目录非空判定保留。import/path/env/which 四路径逐一对拍 **0 DRIFT**。
+
+### ② S7 消费点分批迁移
+- **门控点**：`domain_orchestrator`（Jinja2）/ `anchor_adapter`（summa）/ `infoseek_zerodep_nlp`（summa）/
+  `mirror_map`（PyYAML→json 降级）/ `infoseek_auth`（cryptography）/ `mcp_tools_search`（playwright、whisper）/
+  `sherlock_client`·`maigret_client`（CLI 路径）/ `summarize_adapter`（jieba 经 bridge、summa）/
+  `extensions/qcm/tracing.py`（opentelemetry，深两级 accessor）。
+- **接口用法**：可选/降级点 `is_available`（带缓存），必报错点 `require`，
+  须感知 sys.modules 注入用 `has_module`（whisper，无缓存），CLI 用 `which_path`。
+- **边界裁决**：jieba/pypinyin 保持 `delegate` 委托 `core/jieba_bridge.py` 无双轨；
+  required `import yaml` 与 OTLP 子包不迁移，避免过度收口。
+
+### 守护与回归
+- 未新增测试套件；D-6 守护联动（compliance_audit.py docstring 随 bump、移出 docstring 版本白名单）。
+- **全量回归 81 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT（338s）ALL GREEN**。
+
+---
+
+# Infoseek v2.3.1 发布说明
+
+> 发布日期：2026-09-30 ｜ 版本：**2.3.1**（S5 learned 锚点自动晋级真锚：15 个 accept 词显式开关下接入主链切词锚点层）｜ 许可证：MIT
+> 前置：v2.3.0。PATCH 定级：默认 OFF 逐字节回退，仅在显式开关下叠加消费动态锚点，影响范围可控（变动量 10–30%）。
+
+## v2.3.1 核心改动
+
+### ① S5 晋级真锚
+- **新增** `core/learned_anchor_store.py`（mod-v1.0.0，S4 已落地）：learned 锚点存储三铁律——默认不启用 / 损坏回退空表 / 单向依赖。
+- **新增** `scripts/promote_s5.py`（mod-v1.0.0）：S4 影子对拍人工裁决的 37 候选 → **15 accept 晋级 / 22 reject 不灌库**；每词固化 9 个证据字段（basis_version=v2.3.1）。真实库首次灌库：15 accept / 0 pending。
+- **主链接线** `scripts/infoseek_zerodep_nlp.py` bump mod-v1.2.0：新增 `_active_zh_anchors()` 统一访问协议，双路惰性导入（无顶层 import），默认 OFF 返基线 `_ZH_HIGH_FREQ` 逐字节回退；`INFOSEEK_LEARNED_ANCHORS=1` 显式开启后叠加（非替换）accept 词，两个切词消费点统一收口。
+- **守护**：新增 `tests/test_learned_anchor_s5.py`（31 断言），演进 `test_learned_anchor_s4.py`（F7 契约，29 断言）；risk-register v1.4.0（R38 晋级词误判污染 / R39 store 损坏）。
+- **全量回归**：81 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT（81 标准套件）。
+
+---
+
+# Infoseek v2.3.0 发布说明
+
+> 发布日期：2026-09-29 ｜ 版本：**2.3.0**（中文 NLP 依赖收口：10 处裸 import 单源化 + zerodep 高频词典与共识强化）｜ 许可证：MIT
+> 前置：v2.2.0。MINOR 定级：新增 `core/jieba_bridge.py` 底层模块 + zerodep 词典/投票机制增强，影响中文分词与关键词召回链路（变动量 >30%）。
+
+## v2.3.0 核心改动
+
+### ① 中文 NLP 依赖收口（10 处裸 import → 1 个 bridge）
+- **新增唯一真源** `core/jieba_bridge.py`（mod-v1.0.0）：统一探测 jieba / jieba.dt / jieba.posseg /
+  jieba.analyse / pypinyin，按需 initialize（进程内一次），缺失一次性告警，降级永不抛错；
+  sys.modules 双向登记防双模块状态分裂。
+- **10 处收敛**：`text_tokenizer.py`（mod-v1.1.0，删三套状态）/ `person_ner.py`（删 pypinyin+jieba.dt 两套状态）/
+  `entity_aliases.py`（热路径重复 import 消除）/ `entity_profile.py` / `infoseek_zerodep_nlp.py` /
+  `anchor_adapter.py`×2 / `summarize_adapter.py`×2。消费方保持模块对象晚绑定，mock 契约实测生效。
+
+### ② zerodep 零依赖 NLP 增强（mod-v1.1.0）
+- **内置小型高频词典**：≈250 中文（AI/金融/医疗/能源/消费五域）+ 40 英文领域词；
+  新增「词典匹配估计器 D」，解决 n-gram 对**单频专业词/词表输入**全盲的长尾召回缺口。
+- **锚点掩码切分**：命中词掩码断开连续串，根治「智能大模/能大模型」等跨词 n-gram 噪声。
+- **共识投票强化**：`weighted_consensus` 阈值自适应（≥3 估计器 2 票 / 2 估计器两侧互证）；
+  分层合成——锚点命中即高置信、统计共识补词表外词、单票噪声丢弃、全空兜底收紧；置信 (0,3]。
+
+### 守护与回归
+- 新增 `tests/test_jieba_bridge_zerodep_v230.py`（26 断言）；更新 ga5 / ga9（mock bridge 锁定路径）；
+  risk-register v1.3.0（R36/R37）；标准套件 77→**78** / 测试文件 78→**79**；D-6 29 PASS。
+- 全量回归 **78 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT ALL GREEN**。
+
+---
+
 # Infoseek v2.2.0 发布说明
 
 > 发布日期：2026-09-19 ｜ 版本：**2.2.0**（GA11 事件槽批次阶段 1-3：三元事件身份 + 跨文本时间槽键 + LLM 路径收口）｜ 许可证：MIT

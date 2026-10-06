@@ -22,9 +22,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
-from core.capability_registry import (
-    degrade_chain, get_capability, is_effective_enabled,
-)
+try:  # G1：统一包路径优先；scripts/ 直接注入 core/ 时回退顶层（同一模块对象）
+    from core.capability_registry import (
+        degrade_chain, get_capability, is_effective_enabled,
+    )
+except Exception:  # pragma: no cover - 部署形态差异
+    from capability_registry import (
+        degrade_chain, get_capability, is_effective_enabled,
+    )
 
 log = logging.getLogger("infoseek.capability_compensator")
 
@@ -88,6 +93,18 @@ def compensate(cap_name: str,
         # 2) handler 存在判定
         fn = handlers.get(name)
         if fn is None:
+            # G6：末端 graceful_fallback 无 handler 时内置默认，
+            # 保证「缺口必被显式标记」（而非静默丢失 gap_flag）。
+            if kind == "graceful_fallback":
+                out.trail.append((name, "ok"))
+                out.result = [{
+                    "platform": "(需人工核实)", "url": "",
+                    "username": str(args[0]) if args else "",
+                    "confidence": 0.0, "source": name, "_gap": True,
+                }]
+                out.used = name
+                out.gap_flag = True
+                return out
             out.trail.append((name, "no_handler"))
             attempted.append(name)
             continue

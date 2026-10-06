@@ -441,16 +441,42 @@ def _intersect_gap() -> float:
 def _extract_trust_sources(raw: str) -> list:
     """从 profile raw 抽取信任源实体词（替代 v1.8.0 硬编码清单）。
 
-    识别含「来源/Tier/白名单」提示的表格行，抽取中英文专有名词。
+    v2.3.2 修正：实体位于「来源/Tier/白名单」锚点下方的 **Markdown 表格数据行**
+    （如 ``| 监管 | 证监会/上交所/SEC | +25 |``），而旧实现只扫描含 hint 的锚点行，
+    仅能命中表头的「来源/类型」，致领域信任段长期为 0。现改为：
+      1. 定位含 hint 的锚点行（表头/小节标题）；
+      2. 向后收集连续表格行（``| ... |``），跳过分隔行（``|:--``）与表头行；
+      3. 从数据行按 ``/ 、 · , 空白`` 切分抽取中英专有名词。
     """
+    lines = (raw or '').split('\n')
+    # 表格列的类型标签等噪声（非信任源实体）
+    _COL_NOISE = {'权重', '类型', '来源', '适用场景', '监管', '数据', '研报',
+                  '官方', '媒体', 'Tier', '白名单', '信任源白名单'}
     kws = []
-    for line in (raw or '').split('\n'):
+    for i, line in enumerate(lines):
         if not any(h in line for h in _TRUST_HINTS):
             continue
-        for kw in re.findall(r'[\u4e00-\u9fff]{2,6}|[A-Z][a-zA-Z]{2,}', line):
-            if len(kw) >= 2 and kw not in ('权重', 'Tier', '类型', '来源', 'Tier 1', '适用场景'):
-                kws.append(kw)
+        # 锚点命中：向后扫描连续表格块（最多 20 行）
+        for tbl in lines[i + 1: i + 21]:
+            s = tbl.strip()
+            if not s:
+                break                      # 空行 → 表格块结束
+            if not s.startswith('|'):
+                break                      # 非表格行 → 块结束
+            cells = [c.strip() for c in s.strip('|').split('|')]
+            if all(set(c) <= set(':- ') for c in cells):
+                continue                   # 分隔行 |:---|
+            for cell in cells:
+                # 按常见分隔符切分单元格
+                for part in re.split(r'[/、·,\s]+', cell):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    for kw in re.findall(r'[\u4e00-\u9fff]{2,8}|[A-Za-z][A-Za-z0-9.]{1,}', part):
+                        if kw not in _COL_NOISE and not kw.startswith('+'):
+                            kws.append(kw)
     return kws
+
 
 if __name__ == '__main__':
     import sys

@@ -19,11 +19,26 @@ scripts/mirror_map.py — 镜像域映射（P2-2 G4 修复，v2.5.0）
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, Optional
 
 ROOT = Path(__file__).parent.parent
 _DEFAULT_CONFIG = ROOT / 'references' / 'mirror-domains.yaml'
+
+# ── S7：dep_registry 事实层惰性 accessor（外部依赖可用性统一求值，零漂移）──
+_dr = None
+
+
+def _dep_reg():
+    global _dr
+    if _dr is None:
+        _cand = Path(__file__).resolve().parent.parent / "core"
+        if str(_cand) not in sys.path:
+            sys.path.insert(0, str(_cand))
+        import dep_registry as _mod
+        _dr = _mod
+    return _dr
 
 _CACHE: Optional[Dict[str, str]] = None
 _CACHE_FAILED = False
@@ -55,10 +70,13 @@ def load_mirror_map(force: bool = False) -> Dict[str, str]:
         if p.exists():
             text = p.read_text(encoding='utf-8')
             data = None
-            try:
-                import yaml  # noqa: WPS433
-                data = yaml.safe_load(text)
-            except ImportError:
+            if _dep_reg().is_available("PyYAML"):
+                try:
+                    import yaml  # noqa: WPS433
+                    data = yaml.safe_load(text)
+                except ImportError:
+                    data = None
+            if data is None:
                 try:
                     data = json.loads(text)
                 except Exception:  # noqa: BLE001

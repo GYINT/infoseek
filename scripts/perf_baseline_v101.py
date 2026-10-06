@@ -27,6 +27,12 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'core'))
 
+# 版本动态引用唯一真源（2026-09-29：原写死 2.2.0 漂移）
+try:
+    from mcp_tools_common import SKILL_VERSION as _BASELINE_VERSION
+except Exception:
+    _BASELINE_VERSION = '2.3.0'
+
 REAL_ENTITIES = ['OpenAI', '腾讯', '阿里', '英伟达', '宁德时代', '华为', '百度',
                  '小米', '字节跳动', 'Meta', '苹果', '三星', '特斯拉', '比亚迪',
                  '大疆', '京东', '美团', '拼多多', '蔚来', '理想']
@@ -127,7 +133,7 @@ def main() -> int:
     from infoseek_core_v2 import score_source, research
     from conflict_v3 import detect_conflicts_v3
 
-    print(f'=== infoseek 性能基准（{n} 源 × {rounds} 轮 · v2.2.0 B4）===')
+    print(f'=== infoseek 性能基准（{n} 源 × {rounds} 轮 · {_BASELINE_VERSION} B4）===')
     sources = make_sources(n)
 
     score_ts, conflict_ts, research_ts = [], [], []
@@ -160,7 +166,7 @@ def main() -> int:
               f'research {metrics["research_p50"]}/{metrics["research_p95"]}s')
 
     baseline = {
-        'version': '2.2.0',
+        'version': _BASELINE_VERSION,
         'generated_at': time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime()),
         'scale': n,
         'rounds': rounds,
@@ -185,7 +191,7 @@ def main() -> int:
         for row in prof['tottime'][:5]:
             print(f"    {row['tottime']:>8.3f}s tot  {row['cumtime']:>7.3f}s cum  {row['func'][:70]}")
         prof_out = {
-            'version': '2.2.0',
+            'version': _BASELINE_VERSION,
             'generated_at': baseline['generated_at'],
             'subject': '行业 2026 竞争格局',
             'scale': len(prof_src),

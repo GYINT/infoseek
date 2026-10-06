@@ -33,6 +33,14 @@ from datetime import date
 from pathlib import Path
 from typing import List, Dict, Optional
 
+# G8-apply: 公共入口类型契约守卫（纯 stdlib，scripts/entry_guard.py）
+import sys as _eg_sys
+from pathlib import Path as _eg_p
+_eg_dir = str(_eg_p(__file__).resolve().parent.parent / 'scripts')
+if _eg_dir not in _eg_sys.path:
+    _eg_sys.path.insert(0, _eg_dir)
+from entry_guard import (require_text, require_mapping, require_sequence, coerce_mapping_list)
+
 # ═══════════════════════════════════════════════════════════════
 # ORG: 公司/组织（50+）
 # ═══════════════════════════════════════════════════════════════
@@ -412,6 +420,8 @@ def get_all_entities() -> List[Dict]:
 
 def get_entities_by_type(entity_type: str) -> List[Dict]:
     """按类型获取实体"""
+    # G8-apply: 类型契约守卫（拒绝 None/非 str → 受控 TypeError，替代 None.upper 崩溃）
+    require_text(entity_type, "entity_type")
     mapping = {
         'ORG': ORG_ENTITIES,
         'PRODUCT': PRODUCT_ENTITIES,

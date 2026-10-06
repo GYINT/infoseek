@@ -15,6 +15,13 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+# G8-apply: 公共入口类型契约守卫（纯 stdlib，scripts/entry_guard.py）
+import sys as _eg_sys
+_eg_dir = str(Path(__file__).resolve().parent.parent / 'scripts')
+if _eg_dir not in _eg_sys.path:
+    _eg_sys.path.insert(0, _eg_dir)
+from entry_guard import (require_text, require_mapping, require_sequence, coerce_mapping_list)
+
 CORE_DIR = Path(__file__).parent
 V2_PATH = CORE_DIR.parent / 'references' / 'trusted-sources.json'
 
@@ -64,6 +71,9 @@ def compute_trust_bonus(url: str, domain: str = 'general', platform: str = '') -
 
     v2.0：pattern 子串通道仅来自 white_list（含 patterns/tier/weight）。
     """
+    # G8-apply: 类型契约守卫（允许 None 透传降级，拒绝 int/float/dict 等非文本）
+    if url is not None and not isinstance(url, str):
+        raise TypeError(f"url 需为文本(str)或 None，收到 {type(url).__name__}: {url!r}")
     url_lower = (url or '').lower()
     platform_lower = (platform or '').lower()
     bonus = 0

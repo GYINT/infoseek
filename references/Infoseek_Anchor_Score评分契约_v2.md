@@ -95,7 +95,7 @@ base_score = max(
 | base 来源 | `compute_base_score_v2`（四维加权） | 三态入口，由 **`base_origin`** 标注：`four_dim`（含四维字段 → 转调链A）/ `v1_score`（仅 `score`）/ `semantic_fallback`（§3 兜底）/ `empty` |
 | 聚合 | **委托 `aggregate_score_v2`** | **委托 `aggregate_score_v2`**（同源）|
 | trust_bonus | 纯信任源 0-30 | = `trust_bonus_base`(0-30) + `kb_bonus`(0-12)，合计 0-42 |
-| domain_bonus | 计入 final | **仅报告不计入 final**（信任/KB 加分已经 `trust_bonus` 进入聚合，避免双重计分）|
+| domain_bonus | 计入 final | **计入 final**（v2.3.2 收口：经聚合真源 `aggregate_score_v2` 环节化计入；仅承载纯领域特定信任段 0-20，KB 交集段已在 `trust_bonus`，故不双重计分）|
 | tier | `resolve_tier_v2` → `get_tier_level`（1-4）| `get_tier_level`（1-4，同源）|
 
 > base 差异是**有意的入口差异**（链B 须兼容 v1 输入与真实搜索源），非口径分叉。
