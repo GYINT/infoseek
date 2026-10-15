@@ -1,6 +1,6 @@
 # Infoseek 路线图（当前基线 · 待办 · 前景方向）
 
-> 版本：v2.6.0 ｜ 更新：2026-10-06
+> 版本：v2.6.1 ｜ 更新：2026-10-15
 >
 > 本文件只保留**面向当前**的内容：已达成基线、真实未完成待办、前景方向、验收总闸。
 > 各历史版本的详细实施记录 / 缺口审计 / 设计裁决已归档至
@@ -9,13 +9,14 @@
 
 ---
 
-## 一、当前基线（v2.6.0）
+## 一、当前基线（v2.6.1）
 
 | 维度 | 状态 |
 | --- | --- |
-| 对外版本 | SKILL_VERSION **2.6.0**（唯一真源 `scripts/mcp_tools_common.py`）；NER 性能优化四阶段 A/B/C：A 单例+NER 缓存、B 静态预算重构（normalize/边界正则预编译 + 实体预算缓存）、C1 热点正则预编译（不引新库）、C2 引入 pyahocorasick 把 name/static/hot/cold 别名正则扇出改为一次自动机扫描（缺失/构建失败静默回退，`INFOSEEK_AC_DISABLE=1` 可关）；research P50 57.4s→25.2s（约 2.3×），NER 不再是第一热点 |
-| 全量回归 | **86 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT**（86 套件，2026-10-06；NER Aho-Corasick 自动机（`core/ner.py` mod-v2.6.0）+ 新增 `tests/test_aho_corasick_c2.py`（29 断言）；性能：extract_entities cum 24.963s→9.873s、冲突 P50 16.9s→6.1s、research P50 57.4s→25.2s；A/B/C 每阶段回归全绿） |
+| 对外版本 | SKILL_VERSION **2.6.1**（唯一真源 `scripts/mcp_tools_common.py`）；调度台阶段 B 状态机固化 + 阶段 C 评测结论落地（不切 auto 默认，阶梯保留显式 opt-in）；前序 NER 性能优化四阶段 A/B/C：A 单例+NER 缓存、B 静态预算重构（normalize/边界正则预编译 + 实体预算缓存）、C1 热点正则预编译（不引新库）、C2 引入 pyahocorasick 把 name/static/hot/cold 别名正则扇出改为一次自动机扫描（缺失/构建失败静默回退，`INFOSEEK_AC_DISABLE=1` 可关）；research P50 57.4s→25.2s（约 2.3×），NER 不再是第一热点 |
+| 全量回归 | **88 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT**（88 套件，2026-10-13；调度台阶段B（`scripts/infoseek_pipeline.py` mod-v1.5.2，PATCH 状态机默认仍等价旧行为）：`_expand_query` 拆出 `_expand_query_variants` 返回 (expanded, extra_list)（模块对象导入契约不变）、新增 `_staged_fanout` Stage0/1/2 阶梯（门控后有效判停/调用预算/<1.2s 不晋升）、`_effective_count` 轻量门控谓词、`_channel_is_high_quality` auto 通道判定（仅 sim/纯内置→保守旧全扇出）；`workbuddy_channel.is_simulated()` + meta capability=simulated、`platform_adapter.platform_engine_simulated()` 三态（守护⑥互斥）；新增 `tests/test_dispatch_stage_b.py`（11 用例覆盖守护①②⑤⑥）；前序阶段A mod-v1.5.1 CN_SUBQ 四态+预算脚手架 `test_dispatch_stage_a.py`；前序 2026-10-06 NER Aho-Corasick 基线 86 PASS、research P50 57.4s→25.2s 约 2.3×） |
 | openfix 批次（2026-09-18，版本号不变） | P0-OPEN-04 score 量纲归一化+禁空骨架 / P0-OPEN-06 时间事实槽+无冲突·未评估区分 / P0-OPEN-05 GPT-5 路由+模板按域收窄+跨源综合段 / P1 README 对齐 19 工具+run_tests SKIP 判定修复；守护 `test_open_fixes_v210.py`（60 断言） |
+| openfix 批次（2026-10-15，版本号不变） | A4 版本联动遗漏修复（2.6.1 发布时 compliance_audit.py 头部 mod-v 仍为 2.6.0、D-6 DIVERGENCE_WHITELIST 未同步）：compliance_audit.py 头部 `mod-v2.6.0`→`2.6.1` + D-6 白名单 `compliance_audit.py: {"2.6.0"}`→`{"2.6.1"}`；守护 test_compliance_audit_v220.py A4（30 断言）/ test_doc_state_sync_d6.py C2（29 断言）；全量复跑 88 PASS / 0 SKIP / 0 FAIL / 0 TIMEOUT（335s）ALL GREEN |
 | 版本体系 | 四维分离：SKILL_VERSION（对外）/ mod-v（模块内部）/ algo-v（下游契约）/ proto-v（MCP） |
 | OSINT 客户端 | sherlock v0.16.x（`--csv` 读结果）/ maigret 0.6.x（`-J simple` 报告文件 + 嵌套 status）契约对齐实测 |
 | 身份归因 | Maigret×Sherlock **双源聚合去重**（`core/identity_aggregator.py`：交叉确认 +0.10/误报抑制/分区）+ AccountTrustScorer 验证 |
@@ -50,6 +51,7 @@
    对真实样本标定（含 sherlock/maigret 结果融合的精度/召回）。
 3. **跨平台安装实证**——`install.sh` 已在 Windows-Git-Bash 校验；Linux/macOS 需目标机
    联网装依赖后各跑一次 `bash install.sh --venv`。
+4. **调度台阶段 D（auto 默认 + bump v2.7.0）待真实快通道补测**——阶段 B 状态机（`scripts/infoseek_pipeline.py` mod-v1.5.2，Stage0/1/2 阶梯）与阶段 C 评测（real/sim/synth 三类对拍）已完成，结论：召回 0 劣化、引擎调用 −34%、P95 −0.06s，但沙箱慢源下平均延迟仅 −0.15s（非显著，Stage1/2 晋升 24 组全未触发，8s 窗口主导）。**裁决（2026-10-15 选项①）：阶梯保留显式 opt-in（`CN_SUBQ=stage`），auto 不切默认；v2.6.1 固化阶段 B 代码 + 评测报告**。**选项③ FAST 模拟通道补充对拍（2026-10-15）已闭合盲区**：沙箱注入亚秒级（~80ms）FAST 引擎模拟真实快通道，双轮对拍 auto vs always —— ①理想形态（Stage0 满足）：延迟 0.16→0.08s（P95 −0.39s，−50%）、调用 −37%、召回 100% 达标不劣化、零晋升（满足标尺 D「延迟降+召回不劣化」严格门槛）；②降级补偿（整句弱/拆词强）：晋升 11/12 真实触发、召回接近不劣化、调用 +11%、延迟 +0.02s 可控（不误停）。**阶段 D 决策影响**：一旦生产具备真实快通道（每源亚秒），阶梯延迟优势成立且显著；FAST 为沙箱模拟非生产真实源，当前沙箱可用真实源仍偏慢。**建议**：生产侧若有快通道（如 WorkBuddy 渲染/直连高速源）→ 据选项③证据推进选项②（切 auto 默认 + bump v2.7.0）；若生产仍以慢源为主 → 维持选项①（阶梯 opt-in），待真生产快通道复现一次即切。回退开关 `CN_SUBQ=always` 保留。评测报告 `/sandbox/workspace/stage_c_ab/STAGE_C_REPORT.md` §7。
 
 ### P2 — 中期（核心收益）
 

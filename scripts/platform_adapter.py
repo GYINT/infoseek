@@ -297,6 +297,25 @@ def platform_engines() -> list:
     return [e] if e else []
 
 
+def platform_engine_simulated() -> bool | None:
+    """§6A.7 当前注册的平台通道是否为仿真（sim）降级实现。
+
+    返回：
+      True  = 已注册但 capability=simulated（stdio sidecar 抓 cn.bing，与池内 Bing 同源）
+      False = 已注册且为真实高质量平台通道（HTTP WorkBuddy / mcp / ima）
+      None  = 未注册任何平台通道（纯 CLI 沙箱）
+    供调度台 auto 模式做通道质量判定（真通道→阶梯少补偿；仅 sim/无通道→保守补偿）。
+    进程内复用 platform_engine 的单次探测缓存，不产生额外网络开销。
+    """
+    e = platform_engine()
+    if not e:
+        return None
+    # 探测期已把通道 meta 记入缓存名；sim 通道名带 (sim) 后缀 / provider 带 (sim)。
+    eng_name = e[0] or ''
+    return '(sim)' in eng_name or 'simulated' in eng_name
+
+
+
 def platform_weight() -> float:
     """融合权重（env INFOSEEK_PLATFORM_WEBSEARCH_WEIGHT 覆盖，默认 0.9）。"""
     try:

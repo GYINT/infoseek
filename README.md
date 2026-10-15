@@ -1,10 +1,10 @@
 # Infoseek
 
-> 端到端内容智能采集与调研工作流。**v2.6.0 发布版**。
+> 端到端内容智能采集与调研工作流。**v2.6.1 发布版**。
 
 [![Status](https://img.shields.io/badge/status-GA%20stable-brightgreen)](#)
-[![Version](https://img.shields.io/badge/version-2.6.0-blue)](#)
-[![Tests](https://img.shields.io/badge/tests-67%20suites%20green-success)](#)
+[![Version](https://img.shields.io/badge/version-2.6.1-blue)](#)
+[![Tests](https://img.shields.io/badge/tests-88%20suites%20green-success)](#)
 [![MCP](https://img.shields.io/badge/MCP-19%20tools-blueviolet)](#)
 
 ---
@@ -256,7 +256,7 @@ r = score_source({"url": "...", "title": "...", "snippet": "..."}, "GPT-5")
 ## 测试
 
 > 测试为「脚本风格」（顶层直接执行），**不要用 pytest 直接收集**（会因 SystemExit 崩溃）。
-> 标准入口：**`python tests/run_tests.py`**（86 标准套件）。当前共 **87 个 `test_*.py`**，绿基线判据
+> 标准入口：**`python tests/run_tests.py`**（88 标准套件）。当前共 **89 个 `test_*.py`**，绿基线判据
 > = 0 FAIL + 0 TIMEOUT；SKIP 单列（可选依赖缺失，不污染基线）。
 
 ```bash
@@ -265,7 +265,7 @@ python tests/run_all.py --timeout 300   # 并发全量（放宽每套件超时�
 python tests/test_three_chain_v183.py   # 单套件直跑
 ```
 
-- **run_tests.py（标准聚合入口 · 推荐）**：逐子进程直跑，排除深度测试 `test_deep_v101.py` → **86 标准套件**；
+- **run_tests.py（标准聚合入口 · 推荐）**：逐子进程直跑，排除深度测试 `test_deep_v101.py` → **88 标准套件**；
   v2.1.0 已修正 SKIP 判定（旧逻辑 returncode==0 先短路吞掉自报 SKIP、且只看 stdout）。
 - **run_all.py（并发全量）**：4 并发统一发现**全部** `test_*.py`、隔离搜索 env
   （`INFOSEEK_PLATFORM_WEBSEARCH=off`）、per-suite 超时、PASS/FAIL/SKIP 三态严格归类、结果 JSON 落盘。
@@ -308,7 +308,7 @@ infoseek/
 ├── domains/            # 领域配置（tech/market/finance/policy/competitor）
 │   ├── *.yaml          # 领域 profile（Markdown 文本，raw 读取）
 │   └── templates.yaml  # 报告模板（v3.2.0，含跨源综合段 + 空源守卫）
-├── tests/              # 87 个测试文件（run_all.py 全发现；run_tests.py → 86 标准套件）
+├── tests/              # 89 个测试文件（run_all.py 全发现；run_tests.py → 88 标准套件）
 └── dist/               # perf 基准（perf_baseline_v101 / perf_profile_v101）+ 生态构建产物
 ```
 

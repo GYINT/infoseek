@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.6.1] - 2026-10-15（调度台阶段B 固化 + 阶段C 评测结论落地，不切 auto 默认）
+
+> 触发：用户指令「规划任务，自主执行，每阶段均需回归测试」（2026-10-13）；阶段 C 完成后裁决「不切默认：阶梯保留显式 opt-in，发 PATCH 固化阶段 B 代码 + 本报告」。
+> 性质：**PATCH，pipeline 仍 mod-v1.5.2，默认行为零变化**（CN_SUBQ 四态不变；auto 在真通道→阶梯、sim/纯内置→保守旧全扇出，阶段 B 已落地）。
+> - 固化阶段 B 状态机（Stage0/1/2 阶梯、`_staged_fanout` / `_effective_count` / `_staged_plan` / `_channel_is_high_quality` 等，全量回归 88 PASS 全绿）。
+> - 阶段 C 三类对拍结论（评测基建在 skill 外 `/sandbox/workspace/stage_c_ab/`，不进打包）：
+>   - **real 真通道**（sidecar `--http` 真网关，auto vs always，12 query×2=24 组真实触网）：召回 12/12 逐对持平（0 劣化）、相关性 0pt、P95 −0.06s、引擎调用 **−34%**；24 组 `promoted=0`（沙箱慢源 8s 窗口主导，Stage1/2 晋升未触发）。
+>   - **sim 纯沙箱**：召回持平、调用 −29%、P95 −0.21s；auto 保守回旧路径（设计预期）。
+>   - **synth 受控合成对拍 8/8 全绿**：晋升补偿有效补回 / Stage0 足够零扩展零倍增 / 全不足有界不伪造。
+>   - **局限**：沙箱慢源下平均延迟仅 −0.15s（非显著），未复现标尺 D 理想形态「真生产快通道→延迟显著降」；real 与 sim 的「real」仅指网关传输形态（HTTP vs stdio），底层搜索源同为公共 cn.bing。
+> - **决策（选项①）**：阶梯保留为显式 opt-in（`CN_SUBQ=stage`）；auto 逻辑就绪但不切默认；阶段 D（切 auto 默认 + bump v2.7.0）待真实快通道环境补测后再推进（已登记 ROADMAP 待办 P1-#11）。
+> - 评测报告：`/sandbox/workspace/stage_c_ab/STAGE_C_REPORT.md`。守护：tests/test_dispatch_stage_b.py（11 用例，阶段 B 已落地）；D-6 文档状态同步联动（88 套件不变）。
+
 ## [2.6.0] - 2026-10-06（NER 性能优化四阶段 A/B/C：热点正则扇出改 Aho-Corasick 自动机单次扫描）
 
 > 触发：用户指令「规划 A→B→C→D 任务路径，审计缺口自主执行，每阶段回归测试；C2 允许引入 aho_corasick」。cProfile 实测 NER 的 `_match_entity` 正则扇出 292146 次 / cum 11.546s，为全链第一热点；research(2k lite) 基线 P50 57.4s。

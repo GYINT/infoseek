@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-infoseek_pipeline.py — 锚点→采集→聚合 全链路调度器 (mod-v1.5.0)
+infoseek_pipeline.py — 锚点→采集→聚合 全链路调度器 (mod-v1.5.2)
 
 从 infos 锚点清单出发，经 anchor_adapter 转换为 seek 意图卡片，
 依次执行：输入契约验证 → URL预检 → 三级降级提取 → 治理反馈 → 输出聚合。
@@ -998,6 +998,251 @@ def _env_flag(name: str, default: bool) -> bool:
     return v not in ('0', 'false', 'False', 'no', 'off')
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# 调度台（§6A 模块二）：CN_SUBQ 四态 + 调用预算 + Stage 脚手架
+#
+# mod-v1.5.1（阶段A，PATCH，零行为变化）：
+#   - 新增 _cn_subq_mode() 把旧布尔 INFOSEEK_CN_SUBQ 解析为四态
+#     （off / always / auto / stage），旧值兼容映射，默认与 auto 暂都等价旧全扇出。
+#   - 新增 _query_budget_variants()（INFOSEEK_QUERY_BUDGET_VARIANTS，默认 2）。
+#   - 新增 _resolve_subqueries() 纯函数：按模式产出子查询序列；阶段 A 下
+#     off=仅整句、其余三态=旧 decompose 全扇出，逐字节等价旧布尔行为。
+#   - Stage0/1/2 阶梯状态机在阶段 B 接线；本阶段仅落地常量与解析器（脚手架）。
+# ──────────────────────────────────────────────────────────────────────────
+
+# 子查询扇出阶段（阶段 B 状态机使用；阶段 A 仅定义，不改执行路径）
+STAGE0 = 0   # 仅整句/扩展后主语义，命中即止（零倍增）
+STAGE1 = 1   # 长尾拆解核心主题子查询补偿
+STAGE2 = 2   # 别名/跨语言 extra 词清单独立补偿（受调用预算约束）
+_STAGE_MIN_REMAIN_S = 1.2   # 守护②：单阶段剩余时间 < 1.2s 不晋升
+_CN_SUBQ_MODES = ('off', 'always', 'auto', 'stage')
+_CN_SUBQ_FALSE = ('0', 'false', 'no', 'off')   # 旧布尔关
+_CN_SUBQ_TRUE = ('1', 'true', 'yes', 'on')     # 旧布尔开（兼容映射→全扇出）
+
+
+def _cn_subq_mode() -> str:
+    """INFOSEEK_CN_SUBQ 四态解析（§6A.6），旧布尔值兼容映射。
+
+    返回 'off' / 'always' / 'auto' / 'stage'：
+      未设置/空        → 'always'（对齐旧默认 True 全扇出；阶段 D 才切 auto 新默认）
+      0/false/no/off   → 'off'    （旧布尔关：仅整句）
+      1/true/yes/on    → 'always' （旧布尔开：全扇出，兼容锁定，不映射 stage）
+      always/auto/stage→ 对应模式（小写、去空白；阶段 A 下 auto 仍等价 always）
+      其它非法值       → 'always' + 告警（保守回退，不静默改变默认）
+    """
+    v = (os.environ.get('INFOSEEK_CN_SUBQ', '') or '').strip().lower()
+    if v == '':
+        return 'always'
+    if v in _CN_SUBQ_FALSE:
+        return 'off'
+    if v in _CN_SUBQ_TRUE:
+        return 'always'
+    if v in _CN_SUBQ_MODES:
+        return v
+    log.warning(f"[dispatch] INFOSEEK_CN_SUBQ='{v}' 非法，回退 always（全扇出）")
+    return 'always'
+
+
+def _query_budget_variants() -> int:
+    """一次 search_web 最多跑多少条 query 变体（§6A.4，平台路与内置计同一总预算）。
+
+    INFOSEEK_QUERY_BUDGET_VARIANTS，默认 2；下限 1；非法/空回退默认。
+    阶段 A 仅解析，阶段 B 状态机接线判停。
+    """
+    v = (os.environ.get('INFOSEEK_QUERY_BUDGET_VARIANTS', '') or '').strip()
+    if not v:
+        return 2
+    try:
+        return max(1, int(float(v)))
+    except (TypeError, ValueError):
+        log.warning(f"[dispatch] INFOSEEK_QUERY_BUDGET_VARIANTS='{v}' 非法，回退 2")
+        return 2
+
+
+def _resolve_subqueries(query: str, expanded: str, mode: str | None = None) -> list:
+    """按 CN_SUBQ 模式产出**旧全扇出路径**的子查询序列（兼容/保底路径）。
+
+    参数：
+      query    : 原始（未扩展）query。
+      expanded : 经 _expand_query 扩展后的 query。
+      mode     : 四态；None 时实时解析 env。
+
+    行为：
+      off    → [expanded]
+      always → _decompose_longtail_cn(expanded)（长尾拆解全扇出，旧布尔开行为）
+      auto   → 通道保守映射（§6A.6 阶段B）：真实高质量平台通道在线才走阶梯少补偿；
+               仅 sim / 纯内置引擎 → 回退保守补偿（= 本函数 always 全扇出）。
+               阶梯调度由 _staged_fanout 执行；本函数仅返回"保守全扇出"子查询，
+               供非阶梯路径（off/always/auto 保守）直接消费。
+      stage  → 强制阶梯（调试 / A-B 对拍）；阶梯子查询由 _staged_plan 构建，
+               search_web 据 mode=='stage' 改走 _staged_fanout，本函数返回值不被使用。
+    """
+    if mode is None:
+        mode = _cn_subq_mode()
+    if mode == 'off':
+        return [expanded]
+    # always / auto（保守）→ 旧的「布尔开 → decompose 全扇出」；
+    # stage 模式下 search_web 走 _staged_fanout，不会消费本返回值。
+    return _decompose_longtail_cn(expanded)
+
+
+def _channel_is_high_quality() -> bool:
+    """§6A.6 auto 模式通道质量判定：真实高质量平台通道在线 → True。
+
+    仅 sim（workbuddy-gateway(sim)，与池内 cn.bing 同源）或无任何平台通道
+    （纯 CLI 沙箱，只有内置引擎）→ False（auto 回退保守全扇出补偿）。
+    platform_adapter 缺失/探测异常 → 保守 False（不臆造高质量通道）。
+    """
+    try:
+        import platform_adapter as _pa
+        sim = _pa.platform_engine_simulated()
+        # sim == False 且非 None：已注册真实通道
+        return sim is False
+    except Exception:
+        return False
+
+
+def _effective_count(results: list, query: str, min_score: int = 12) -> int:
+    """守护⑤：计**门控后有效结果**数（轻量判停口径，区别于未评分原始计数）。
+
+    复用 _filter_relevant 的前三道硬判定（语义分阈值 / 中文多字词硬门槛 /
+    意图槽校验），但不含 LLM 复判与保底窗口（那些是终判才做的补偿，不适合
+    在阶梯判停循环里反复整体调用）。跨语言 bridge 豁免也纳入，保持与主门控一致。
+    用于 Stage0/1 判停：只有"有效结果"达标才停止晋升，未评分原始条数不算。
+    """
+    if not results:
+        return 0
+    try:
+        hard_words = set(_tokenize_query(query))
+        slots = _intent_slots(query) if _env_flag('INFOSEEK_INTENT_GATE', True) else {}
+        n = 0
+        for r in results:
+            text = ' '.join(filter(None, [r.get('title', ''), r.get('snippet', '')]))
+            try:
+                jaccard = _anchor_mod.compute_semantic_similarity(text, query)
+            except Exception:
+                jaccard = 0
+            try:
+                containment = _anchor_mod._string_containment_similarity(text, query) or 0
+            except Exception:
+                containment = 0
+            score = max(jaccard, containment * 0.8)
+            passed = score >= min_score
+            tl = text.lower()
+            if passed and hard_words:
+                passed = any(w in tl for w in hard_words)
+            if passed and slots:
+                passed = _passes_intent(tl, query, slots)
+            if not passed:
+                try:
+                    if (_xling_mod.bridge_score(text, query) or 0) >= min_score:
+                        passed = True
+                except Exception:
+                    pass
+            if passed:
+                n += 1
+        return n
+    except Exception:
+        # 门控异常时保守按 0 计（不阻断调用方，但也不谎报"已足够"而误停晋升）
+        return 0
+
+
+def _staged_plan(orig_query: str) -> tuple:
+    """构建 Stage0/1/2 子查询计划（仅构建，不执行）。
+
+    返回 (stage0_query, stage1_subs:list, stage2_extras:list)：
+      Stage0 = 原始整句（**不做别名扩展**），命中即止 → 零倍增、守护①零 _expand 调用；
+      Stage1 = 长尾中文拆解核心主题（_decompose_longtail_cn(整句)，去掉与 Stage0 重复项）；
+      Stage2 = _expand_query_variants 的 extra 别名/跨语言词清单（独立补偿子查询）。
+    各阶段子查询受 INFOSEEK_QUERY_BUDGET_VARIANTS 总预算约束（在 _staged_fanout 计数）。
+    """
+    stage0 = orig_query
+    s1 = [s for s in _decompose_longtail_cn(orig_query) if s and s != stage0]
+    # Stage2 才付扩展成本（Stage0 足够时 _expand_query_variants 零调用，守护①）
+    _expanded, extras = _expand_query_variants(orig_query)
+    s2 = [e for e in extras if e and e != stage0 and e not in s1]
+    return stage0, s1, s2
+
+
+def _staged_fanout(engines: list, orig_query: str, max_results: int,
+                   reserve: list, deadline: float | None = None,
+                   need: int | None = None) -> list:
+    """Stage0/1/2 阶梯扇出状态机（§6A.5 平移 _parallel_merge_with_reserve 补偿骨架）。
+
+    阶梯：
+      Stage0：仅跑原始整句（零别名倍增）→ 门控后有效结果达标即判停返回；
+      Stage1：不足 → 补长尾拆解核心主题子查询；
+      Stage2：仍不足 → 补别名/跨语言 extra 词清单（受调用预算约束）。
+    判停/晋升规则（守护①②⑤）：
+      - 判停计数取**门控后有效结果**（_effective_count），非未评分原始条数；
+      - 调用预算 INFOSEEK_QUERY_BUDGET_VARIANTS（默认 2）限制累计 query 变体数
+        （平台路与内置计同一总预算），耗尽即停；
+      - 单阶段剩余预算 < 1.2s 不晋升（延迟上界优先）；deadline=None（窗口关）
+        时不做时间门控（原语义），只受调用预算约束。
+    返回 url 去重合并后的未评分结果列表（交 _filter_relevant 终判，与旧路径一致）。
+    """
+    need = need if need is not None else _min_expected(max_results)
+    budget = max(1, _query_budget_variants())
+    collected = {}
+    used = 0
+
+    def _run(sq: str) -> int:
+        nonlocal used
+        try:
+            got = _parallel_merge_with_reserve(
+                engines, sq, max_results, reserve, deadline=deadline)
+        except Exception as e:
+            log.warning(f"[staged] 子查询 '{sq}' 召回失败: {e}")
+            got = []
+        added = 0
+        for r in (got or []):
+            u = r.get('url')
+            if u and u not in collected:
+                collected[u] = r
+                added += 1
+        used += 1
+        return added
+
+    def _can_promote() -> bool:
+        # 守护②：调用预算耗尽不晋升
+        if used >= budget:
+            log.info(f"[staged] 调用预算耗尽（{used}/{budget}），停止晋升")
+            return False
+        # 守护②：单阶段剩余 < 1.2s 不晋升（deadline=None=窗口关，跳过时间门）
+        if deadline is not None and _remaining_budget(deadline) < _STAGE_MIN_REMAIN_S:
+            log.info(f"[staged] 剩余预算 <{_STAGE_MIN_REMAIN_S}s，不晋升下一阶段")
+            return False
+        return True
+
+    # Stage0：原始整句（零扩展），预算计 1
+    _run(orig_query)
+    eff = _effective_count(list(collected.values()), orig_query)
+    log.info(f"[staged] Stage0 '{orig_query}' → 去重 {len(collected)} / 门控有效 {eff}（需 {need}）")
+    if eff >= need:
+        return list(collected.values())
+
+    # 晋升门（守护②）：预算耗尽或剩余 <1.2s → 直接判停，**不构建计划、不付扩展成本**，
+    # 从而保证 budget=1（仅 Stage0）时 _expand_query_variants 零调用（守护①）。
+    if not _can_promote():
+        return list(collected.values())
+
+    # 仅在确要晋升时才构建计划（Stage2 extra 的扩展成本此刻才付）。
+    _s0, s1_subs, s2_extras = _staged_plan(orig_query)
+    for stage_name, subs in ((STAGE1, s1_subs), (STAGE2, s2_extras)):
+        for sq in subs:
+            if not _can_promote():
+                return list(collected.values())
+            _run(sq)
+            eff = _effective_count(list(collected.values()), orig_query)
+            log.info(f"[staged] Stage{stage_name} '{sq}' → 去重 {len(collected)} / "
+                     f"门控有效 {eff}（需 {need}，预算 {used}/{budget}）")
+            if eff >= need:
+                return list(collected.values())
+    return list(collected.values())
+
+
+
+
 _QUERY_TYPE_KEYWORDS = {
     'finance': ('财报', '营收', '利润', '股价', '融资', '估值', '市值', 'IPO',
                 '净利', '市盈率', '回购', '分红', '现金流', '业绩'),
@@ -1085,12 +1330,15 @@ def _decompose_longtail_cn(query: str) -> list:
     return subs[:3]
 
 
-def _expand_query(query: str) -> str:
-    """v1.2.x 召回增强：query 扩展（INFOSEEK_RECALL_EXPAND=1 默认开）。
+def _expand_query_variants(query: str) -> tuple:
+    """调度台 §6A（mod-v1.5.1 阶段B）：返回 (expanded_query, extra_list)。
 
-    识别 query 中出现的已知实体（name/aliases 命中），追加其别名（≤3 个）
-    以提升跨名召回（如「比亚迪」→ 补充「BYD 比亚迪股份」）。
-    无命中/异常 → 原样返回；引入的噪声由 _filter_relevant 相关性门控兜底。
+    与旧 _expand_query 同一套别名/图谱/跨语言扩展逻辑，但额外把追加词以
+    **独立清单**返回（不再只拼进一个字符串），供 Stage2 作为独立补偿子查询，
+    且保持 import _xling_mod / _person_mod / _anchor_mod 模块对象导入契约
+    （支撑测试 mock 间谍断言：Stage0 已足够时本函数零调用）。
+
+    无命中/异常 → (query, [])。
     """
     try:
         import sys as _s
@@ -1192,10 +1440,22 @@ def _expand_query(query: str) -> str:
 
         if extra:
             log.info(f"[recall] query 扩展 '{query}' → +{extra}")
-            return (query + ' ' + ' '.join(extra)).strip()
-        return query
+            return ((query + ' ' + ' '.join(extra)).strip(), list(extra))
+        return query, []
     except Exception:
-        return query
+        return query, []
+
+
+def _expand_query(query: str) -> str:
+    """v1.2.x 召回增强：query 扩展（旧字符串签名，薄封装 _expand_query_variants）。
+
+    识别 query 中出现的已知实体（name/aliases 命中），追加其别名（≤3 个）
+    以提升跨名召回（如「比亚迪」→ 补充「BYD 比亚迪股份」）。
+    无命中/异常 → 原样返回；引入的噪声由 _filter_relevant 相关性门控兜底。
+    调度台 Stage2 需要独立 extra 清单时直接调 _expand_query_variants。
+    """
+    expanded, _extra = _expand_query_variants(query)
+    return expanded
 
 
 def _merge_diverse(collected: dict, max_results: int, query: str) -> list:
@@ -1629,6 +1889,21 @@ def _fanout_recall(engines: list, subqueries: list, max_results: int,
     return list(collected.values())
 
 
+def _recall_layer(engines: list, max_results: int, reserve: list,
+                  deadline, use_staged: bool, orig_query: str,
+                  subqueries: list) -> list:
+    """层内召回统一入口：阶梯状态机（_staged_fanout）或旧全扇出（_fanout_recall）。
+
+    use_staged=True  → Stage0/1/2 阶梯（门控后判停/预算/<1.2s 不晋升，守护①②⑤）；
+    use_staged=False → 旧 decompose 全扇出或整句（off/always/auto 保守）。
+    """
+    if use_staged:
+        return _staged_fanout(engines, orig_query, max_results, reserve,
+                              deadline=deadline)
+    return _fanout_recall(engines, subqueries, max_results, reserve,
+                          deadline=deadline)
+
+
 def search_web(query: str, max_results: int = 10) -> list:
     """搜索降级链（v1.1.0 并行化）：
 
@@ -1643,12 +1918,23 @@ def search_web(query: str, max_results: int = 10) -> list:
     返回 [{"url","title","snippet"},...]；全链失败返回 []（不伪造）。
     """
     # v1.2.x 召回增强：query 扩展（默认开）——别名扩展提升跨名召回
-    if _env_flag('INFOSEEK_RECALL_EXPAND', True):
+    _orig_query = query
+    _mode = _cn_subq_mode()
+    # §6A.6 阶段B：stage 强制档 或 auto 且真实高质量平台通道在线 → 阶梯调度；
+    # off / always / auto(仅 sim 或纯内置=保守) → 旧全扇出/整句路径。
+    _use_staged = (_mode == 'stage' or
+                   (_mode == 'auto' and _channel_is_high_quality()))
+    if _use_staged:
+        # 阶梯路径内部按 Stage0(整句)→Stage2(extra) 自行决定何时付扩展成本，
+        # 外部不预先 expand（守护①：Stage0 足够时 _expand_query 零调用）。
+        query = _orig_query
+    elif _env_flag('INFOSEEK_RECALL_EXPAND', True):
         query = _expand_query(query)
-    # P0-1：长尾中文子查询拆解并行召回（默认开；INFOSEEK_CN_SUBQ=0 关闭）
-    subs = (_decompose_longtail_cn(query)
-            if _env_flag('INFOSEEK_CN_SUBQ', True) else [query])
+    # 非阶梯路径沿用旧子查询序列（off→[整句]，always/auto 保守→decompose 全扇出）。
+    subs = _resolve_subqueries(_orig_query, query, mode=_mode)
     if os.environ.get('INFOSEEK_SEARCH_PARALLEL', '1') == '0':
+        # §6A.8 豁免声明：INFOSEEK_SEARCH_PARALLEL=0 是显式调试/回退路径，保持旧
+        # 串行全扇出语义，不做阶梯判停（阶梯仅在默认并行路径 _staged_fanout 生效）。
         _serial = {}
         for sq in subs:
             for r in _search_web_serial(sq, max_results):
@@ -1666,10 +1952,10 @@ def search_web(query: str, max_results: int = 10) -> list:
     if ai_mode and _has_ai_key():
         # AI 模式：AI 引擎（权重高）+ 免费引擎全并行，免费引擎为保留池
         ai_layer = _ai_engines() + _free_engines()
-        got = _fanout_recall(ai_layer, subs, max_results,
-                             get_lifecycle().get_active(
-                                 _reserve_pool(True, ai_layer)),
-                             deadline=deadline)
+        got = _recall_layer(ai_layer, max_results,
+                            get_lifecycle().get_active(
+                                _reserve_pool(True, ai_layer)),
+                            deadline, _use_staged, _orig_query, subs)
         if got:
             log.info(f"[AI-layer] '{query}' → {len(got)} 条（并行合并）")
             _got = _filter_relevant(got, query)
@@ -1684,10 +1970,10 @@ def search_web(query: str, max_results: int = 10) -> list:
         default_layer = default_layer + _quota_engines_with_key()
         log.info('[concurrent-all] 付费引擎并入主并行（INFOSEEK_CONCURRENT_ALL=1）')
 
-    got = _fanout_recall(default_layer, subs, max_results,
-                         get_lifecycle().get_active(
-                             _reserve_pool(False, default_layer)),
-                         deadline=deadline)
+    got = _recall_layer(default_layer, max_results,
+                        get_lifecycle().get_active(
+                            _reserve_pool(False, default_layer)),
+                        deadline, _use_staged, _orig_query, subs)
     if got:
         log.info(f"[default-layer] '{query}' → {len(got)} 条（并行合并）")
         _got = _filter_relevant(got, query)

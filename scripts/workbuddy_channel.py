@@ -33,12 +33,30 @@ import urllib.request
 from pathlib import Path
 
 name = 'WorkBuddy-WebSearch'
-meta = {'name': name, 'provider': 'workbuddy-gateway', 'cost': '$0'}
 
 _CALL_TIMEOUT = float(os.environ.get('WBG_CALL_TIMEOUT', '10') or 10)
 _SIDECAR = os.environ.get('WBG_SIDECAR_CMD') or (
     f'{sys.executable} {Path(__file__).parent / "wb_gateway_sidecar.py"}')
 _GATEWAY_URL = os.environ.get('WBG_GATEWAY_URL', '').strip()
+
+# §6A.7 调度台互斥：stdio sidecar（无 WBG_GATEWAY_URL）内部抓 cn.bing，是 wb 槽位的
+# **仿真降级实现**（simulated）；HTTP 网关（WBG_GATEWAY_URL 指向真实 WorkBuddy 桌面端/
+# 宿主 sidecar）才是真实高质量平台通道。platform_adapter 据此做 sim/真通道互斥注册。
+_SIMULATED = not bool(_GATEWAY_URL)
+_SIM_NAME = 'WorkBuddy-WebSearch(sim)'
+meta = ({'name': _SIM_NAME, 'provider': 'workbuddy-gateway(sim)',
+         'cost': '$0', 'capability': 'simulated', 'source': 'sim'}
+        if _SIMULATED else
+        {'name': name, 'provider': 'workbuddy-gateway', 'cost': '$0'})
+
+
+def is_simulated() -> bool:
+    """当前通道是否为仿真降级（stdio sidecar 抓 cn.bing），非真实 WorkBuddy 通道。
+
+    判定依据：未注入 WBG_GATEWAY_URL（→ spawn 本地 wb_gateway_sidecar.py）。
+    供 platform_adapter 守护⑥互斥注册与 auto 模式通道质量判定（§6A.6/§6A.7）。
+    """
+    return _SIMULATED
 
 _client = None          # MCP stdio 客户端单例
 _lock = threading.Lock()

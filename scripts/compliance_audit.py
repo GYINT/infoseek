@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Infoseek 合规审计自动化（D-8 / P3-9 立项落地，mod-v2.6.0）
+"""Infoseek 合规审计自动化（D-8 / P3-9 立项落地，mod-v2.6.1）
 
 四链合一自动化审计报告（P3-9 定义：抓取合规 / 版权 / 凭证审计的自动化报告）：
   ① 凭证链      复用 scripts/leak_scan.py（密钥字面量扫描）+ core/key_manager.py（脱敏状态）
